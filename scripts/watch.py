@@ -15,7 +15,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from download import download, is_url  # noqa: E402
+from download import download, is_url, normalize_yt_url  # noqa: E402
 from frames import MAX_FPS, auto_fps, auto_fps_focus, extract, format_time, get_metadata, parse_time  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 from whisper import load_api_key, transcribe_video  # noqa: E402
@@ -55,6 +55,9 @@ def main() -> int:
         work = Path(tempfile.mkdtemp(prefix="watch-"))
     work.mkdir(parents=True, exist_ok=True)
     print(f"[watch] working dir: {work}", file=sys.stderr)
+
+    # Normalize YouTube URL before any processing (strips list=, si=, pp=, etc.)
+    args.source = normalize_yt_url(args.source)
 
     print(
         "[watch] downloading via yt-dlp…" if is_url(args.source) else "[watch] using local file…",

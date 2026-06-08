@@ -11,7 +11,53 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+
+
+# ── URL-Normalisierung ────────────────────────────────────────────────────────
+
+def normalize_yt_url(url: str) -> str:
+    """Normalize any YouTube URL to canonical https://www.youtube.com/watch?v=ID form.
+
+    Strips extra parameters (list, index, pp, si, feature, t, start_radio,
+    ab_channel, etc.).  Handles youtube.com/watch, youtu.be, /shorts/, /live/.
+    Non-YouTube URLs and local file paths pass through unchanged.
+    """
+    if not url.startswith(("http://", "https://")):
+        return url
+
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+
+    # youtu.be/VIDEO_ID
+    if host in ("youtu.be", "www.youtu.be"):
+        video_id = parsed.path.lstrip("/").split("/")[0]
+        if video_id:
+            return f"https://www.youtube.com/watch?v={video_id}"
+        return url
+
+    # Only handle youtube.com domains
+    if not (host == "youtube.com" or host.endswith(".youtube.com")):
+        return url
+
+    path = parsed.path.rstrip("/")
+
+    # /shorts/ID and /live/ID
+    for prefix in ("/shorts/", "/live/"):
+        if path.startswith(prefix):
+            video_id = path[len(prefix):].split("/")[0]
+            if video_id:
+                return f"https://www.youtube.com/watch?v={video_id}"
+            return url
+
+    # /watch?v=ID — strip extra params
+    if path == "/watch":
+        params = parse_qs(parsed.query, keep_blank_values=False)
+        video_id = params.get("v", [None])[0]
+        if video_id:
+            return f"https://www.youtube.com/watch?v={video_id}"
+
+    return url
 
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".flv", ".wmv"}
@@ -63,6 +109,9 @@ def download_url(url: str, out_dir: Path) -> dict:
     if shutil.which("yt-dlp") is None:
         raise SystemExit("yt-dlp is not installed. Install with: brew install yt-dlp")
 
+    # Normalize YouTube URL (strip list=, si=, pp=, etc.)
+    url = normalize_yt_url(url)
+
     out_dir.mkdir(parents=True, exist_ok=True)
     output_template = str(out_dir / "video.%(ext)s")
 
@@ -78,6 +127,7 @@ def download_url(url: str, out_dir: Path) -> dict:
         "--sub-format", "vtt",
         "--convert-subs", "vtt",
         "--no-playlist",
+        "--windows-filenames",    # cross-platform-safe filenames
         "--ignore-errors",
         "-o", output_template,
         "--",
