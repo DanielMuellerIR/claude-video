@@ -2,8 +2,13 @@
 """Transcribe a video via Groq or OpenAI Whisper API, or local whisper.cpp.
 
 Strategy: extract audio, then either:
-  - local backend: run whisper-cli locally via whisper.cpp (no API key needed)
-  - groq / openai backend: upload mono 16kHz mp3 to the Whisper cloud API
+  - local backend: run whisper-cli locally via whisper.cpp (no API key needed,
+    no length limit — handles arbitrarily long videos offline)
+  - groq / openai backend: upload mono 16kHz mp3 to the Whisper cloud API.
+    The cloud APIs accept up to ~25 MB per request (~50 min at 64 kbps).
+    For longer audio the file is automatically split into time-based chunks,
+    each chunk is transcribed independently, and the returned segments are
+    merged with correct cumulative time offsets.
 
 Returns segments in the same shape as transcribe.parse_vtt so the rest of the
 pipeline (filter_range, format_transcript) doesn't care where the transcript
@@ -447,6 +452,155 @@ def _segments_from_response(data: dict) -> list[dict]:
     return out
 
 
+# Maximale Upload-Größe für Cloud-APIs in Bytes (~24 MB Sicherheitspuffer unter dem 25 MB Limit).
+_CLOUD_MAX_BYTES = 24 * 1024 * 1024
+
+
+def _get_audio_duration_seconds(audio_path: Path) -> float:
+    """Ermittle die Dauer einer Audiodatei in Sekunden via ffprobe.
+
+    Gibt 0.0 zurück wenn ffprobe nicht verfügbar oder der Aufruf scheitert.
+    """
+    if shutil.which("ffprobe") is None:
+        return 0.0
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(audio_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return 0.0
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def _split_audio_chunk(audio_path: Path, chunk_dir: Path, start_sec: float, duration_sec: float, index: int) -> Path:
+    """Schneide einen Zeitabschnitt aus der Audiodatei heraus.
+
+    Nutzt ffmpeg mit -ss/-t für präzise, schnelle Segmentierung ohne Re-Encoding
+    (copy-Codec für mp3).  Gibt den Pfad zur erzeugten Chunk-Datei zurück.
+    """
+    chunk_path = chunk_dir / f"chunk_{index:04d}.mp3"
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        "-i", str(audio_path),
+        "-ss", str(start_sec),
+        "-t", str(duration_sec),
+        "-c:a", "copy",  # kein Re-Encoding — schnell und verlustfrei
+        str(chunk_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise SystemExit(f"ffmpeg chunk split failed (chunk {index}): {result.stderr.strip()}")
+    if not chunk_path.exists() or chunk_path.stat().st_size == 0:
+        raise SystemExit(f"ffmpeg produced empty chunk {index}")
+    return chunk_path
+
+
+def _transcribe_cloud_chunked(
+    audio_path: Path,
+    endpoint: str,
+    api_key: str,
+    model: str,
+) -> list[dict]:
+    """Transkribiere eine lange Audiodatei in zeitbasierten Chunks.
+
+    Ablauf:
+    1. Bestimme die Gesamtdauer via ffprobe.
+    2. Berechne die Chunk-Länge so, dass jeder Chunk unter _CLOUD_MAX_BYTES bleibt.
+    3. Schneide die Chunks mit ffmpeg (copy-Codec, kein Qualitätsverlust).
+    4. Transkribiere jeden Chunk separat über _post_whisper.
+    5. Addiere auf die Zeitstempel jedes Chunks den kumulierten Zeitoffset aller
+       vorherigen Chunks (chunk_start_sec), damit das Ergebnis-Merge korrekte
+       absolute Zeitangaben enthält.
+    6. Lösche den Temp-Ordner in jedem Fall (try/finally).
+
+    Gibt die zusammengeführte Segment-Liste zurück.
+    """
+    import tempfile
+
+    total_duration = _get_audio_duration_seconds(audio_path)
+    if total_duration <= 0:
+        # Fallback: Dauer unbekannt, direkt hochladen — schlägt ggf. mit 413 fehl
+        print(
+            "[watch] Warnung: Audiodauer konnte nicht ermittelt werden, lade direkt hoch…",
+            file=sys.stderr,
+        )
+        response = _post_whisper(endpoint, api_key, model, audio_path)
+        return _segments_from_response(response)
+
+    # Bit-Rate der MP3-Datei (64 kbps), ergibt ~480 kB/min.
+    # Wir berechnen die maximale Chunk-Länge in Sekunden aus der Dateigröße und Dauer.
+    file_size = audio_path.stat().st_size
+    if file_size > 0 and total_duration > 0:
+        bytes_per_sec = file_size / total_duration
+    else:
+        bytes_per_sec = 64 * 1024 / 8  # 64 kbps als sicherer Fallback
+
+    # Maximale Chunk-Dauer mit 10 % Sicherheitspuffer
+    max_chunk_sec = (_CLOUD_MAX_BYTES / bytes_per_sec) * 0.90
+    if max_chunk_sec < 10:
+        max_chunk_sec = 10  # Mindest-Chunk-Länge: 10 Sekunden
+
+    # Anzahl der Chunks
+    num_chunks = int(total_duration / max_chunk_sec) + 1
+    print(
+        f"[watch] audio zu lang für direkt-Upload ({file_size / 1024:.0f} kB / "
+        f"{total_duration / 60:.1f} min) — wird in {num_chunks} Chunks aufgeteilt…",
+        file=sys.stderr,
+    )
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="watch_whisper_chunks_"))
+    all_segments: list[dict] = []
+    cumulative_offset = 0.0  # Summe der Dauern aller bisher transkribierten Chunks
+
+    try:
+        chunk_index = 0
+        chunk_start = 0.0
+
+        while chunk_start < total_duration:
+            chunk_duration = min(max_chunk_sec, total_duration - chunk_start)
+            chunk_path = _split_audio_chunk(audio_path, tmp_dir, chunk_start, chunk_duration, chunk_index)
+
+            print(
+                f"[watch]   chunk {chunk_index + 1}/{num_chunks}: "
+                f"{chunk_start / 60:.1f}–{(chunk_start + chunk_duration) / 60:.1f} min …",
+                file=sys.stderr,
+            )
+
+            response = _post_whisper(endpoint, api_key, model, chunk_path)
+            chunk_segments = _segments_from_response(response)
+
+            # Zeitoffset auf alle Segmente dieses Chunks addieren
+            for seg in chunk_segments:
+                all_segments.append({
+                    "start": round(seg["start"] + cumulative_offset, 2),
+                    "end": round(seg["end"] + cumulative_offset, 2),
+                    "text": seg["text"],
+                })
+
+            cumulative_offset += chunk_duration
+            chunk_start += chunk_duration
+            chunk_index += 1
+
+    finally:
+        # Temp-Verzeichnis in jedem Fall löschen — auch bei Fehler
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass  # Cleanup-Fehler niemals den Haupt-Fehler überlagern lassen
+
+    return all_segments
+
+
 def transcribe_video(
     video_path: str,
     audio_out: Path,
@@ -478,16 +632,23 @@ def transcribe_video(
     print(f"[watch] extracting audio for Whisper ({backend})…", file=sys.stderr)
     audio_path = extract_audio(video_path, audio_out)
     size_kb = audio_path.stat().st_size / 1024
-    print(f"[watch] audio: {size_kb:.0f} kB — uploading to {backend} Whisper…", file=sys.stderr)
+    file_size = audio_path.stat().st_size
 
     if backend == "groq":
-        response = _post_whisper(GROQ_ENDPOINT, api_key, GROQ_MODEL, audio_path)
+        endpoint, model = GROQ_ENDPOINT, GROQ_MODEL
     elif backend == "openai":
-        response = _post_whisper(OPENAI_ENDPOINT, api_key, OPENAI_MODEL, audio_path)
+        endpoint, model = OPENAI_ENDPOINT, OPENAI_MODEL
     else:
         raise SystemExit(f"Unknown whisper backend: {backend}")
 
-    segments = _segments_from_response(response)
+    if file_size > _CLOUD_MAX_BYTES:
+        # Datei zu groß für direkten Upload — automatisch in Chunks aufteilen
+        segments = _transcribe_cloud_chunked(audio_path, endpoint, api_key, model)
+    else:
+        print(f"[watch] audio: {size_kb:.0f} kB — uploading to {backend} Whisper…", file=sys.stderr)
+        response = _post_whisper(endpoint, api_key, model, audio_path)
+        segments = _segments_from_response(response)
+
     if not segments:
         raise SystemExit("Whisper returned no transcript segments")
 

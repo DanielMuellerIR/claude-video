@@ -156,7 +156,8 @@ Other knobs (passed to `scripts/watch.py`):
 
 - **Best accuracy: under 10 minutes.** Past that the script prints a "sparse scan" warning — re-run focused on the part you actually care about with `--start`/`--end`.
 - **Hard caps: 2 fps, 100 frames.** Frame count drives token cost; the script enforces this even when the auto-fps math would imply higher.
-- **Whisper upload limit: 25 MB.** At mono 16 kHz that's about 50 minutes of audio. Longer videos need either captions or `--start`/`--end` to a smaller window.
+- **`--whisper local` has no length limit.** whisper.cpp runs entirely on your machine and handles arbitrarily long videos — the only constraints are disk space and CPU time.
+- **Cloud backends (Groq / OpenAI) have a 25 MB / ~50 min per-request limit.** For longer audio these backends now auto-split the file into time-based chunks with ffmpeg, transcribe each chunk, and merge the results with correct timestamps. No manual `--start`/`--end` needed.
 - **No private platforms.** This skill doesn't log into anything. Public URLs and local files only. If yt-dlp can't reach it without auth, neither can `/watch`.
 
 ## Structure
