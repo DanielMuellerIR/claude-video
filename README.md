@@ -189,11 +189,19 @@ Releasing: tag `vX.Y.Z`, push the tag. The workflow builds `dist/watch.skill` an
 
 See [CHANGELOG.md](CHANGELOG.md) for version history.
 
+## Fork — local whisper.cpp backend
+
+This repository is a fork of [bradautomates/claude-video](https://github.com/bradautomates/claude-video) (original author: Bradley Bonanno, MIT license). The original work is unchanged and fully credited.
+
+**What this fork adds:** a `--whisper local` backend that transcribes entirely on your machine using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — no API key, no network traffic after the one-time model download. The cloud Groq/OpenAI path is preserved as the fallback. See `SKILL.md` → "Local backend" for setup instructions.
+
+---
+
 ## Open source
 
 MIT license.
 
-Built on `yt-dlp`, `ffmpeg`, and Claude's multimodal `Read` tool. Whisper transcription via [Groq](https://groq.com) or [OpenAI](https://openai.com).
+Built on `yt-dlp`, `ffmpeg`, and Claude's multimodal `Read` tool. Whisper transcription via [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (local), [Groq](https://groq.com), or [OpenAI](https://openai.com).
 
 ---
 

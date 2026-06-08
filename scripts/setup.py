@@ -35,14 +35,23 @@ ENV_TEMPLATE = """# /watch API configuration
 # Whisper transcription fallback — used only when yt-dlp cannot get captions
 # (or when you point /watch at a local file with no subtitles).
 #
-# Groq is preferred: it runs whisper-large-v3 at a fraction of OpenAI's price
-# and is faster in practice. OpenAI is the compatible fallback.
+# Option 1 — Local whisper.cpp (no API key, fully offline after model download):
+#   Install whisper.cpp, then run /watch with --whisper local, or set:
+#     WATCH_WHISPER_BACKEND=local
+#   Model is downloaded from Hugging Face on first use (large-v3-turbo by default).
+#   Override model:      WATCH_WHISPER_MODEL=<model-name>
+#   Override cache dir:  WATCH_WHISPER_MODELS_DIR=~/.cache/yt-transcribe/models
 #
-# Get a Groq key:  https://console.groq.com/keys
-# Get an OpenAI key:  https://platform.openai.com/api-keys
+# Option 2 — Groq cloud API (preferred cloud option: cheaper, faster):
+#   Get a key: https://console.groq.com/keys
+#   Runs whisper-large-v3.
 #
-# Leave both blank to disable Whisper — /watch will still work, but videos
-# without native captions will come back frames-only.
+# Option 3 — OpenAI cloud API (fallback):
+#   Get a key: https://platform.openai.com/api-keys
+#   Runs whisper-1.
+#
+# Leave all options unconfigured to disable Whisper — /watch will still work,
+# but videos without native captions will come back frames-only.
 
 GROQ_API_KEY=
 OPENAI_API_KEY=
@@ -100,6 +109,10 @@ def _have_api_key() -> tuple[bool, str | None]:
         return True, "groq"
     if _read_env_key("OPENAI_API_KEY"):
         return True, "openai"
+    # Local whisper.cpp counts as a valid transcription backend — no API key needed.
+    for binary in ("whisper-cli", "main", "whisper"):
+        if _which(binary):
+            return True, "local"
     return False, None
 
 
@@ -238,7 +251,9 @@ def cmd_check() -> int:
     if s["missing_binaries"]:
         parts.append(f"missing binaries: {', '.join(s['missing_binaries'])}")
     if not s["has_api_key"]:
-        parts.append("no Whisper API key (GROQ_API_KEY or OPENAI_API_KEY)")
+        parts.append(
+            "no Whisper backend (set GROQ_API_KEY, OPENAI_API_KEY, or install whisper-cli)"
+        )
     installer = Path(__file__).resolve()
     sys.stderr.write(
         f"[watch] setup incomplete ({'; '.join(parts)}). "
@@ -302,13 +317,17 @@ def cmd_install() -> int:
         return 0
 
     print("")
-    print("[setup] one step left: add a Whisper API key.")
+    print("[setup] one step left: configure a Whisper transcription backend.")
     print("")
-    print(f"  Edit {CONFIG_FILE} and set either:")
+    print("  Option A — local whisper.cpp (no API key, fully offline after model download):")
+    print("    Install: brew install whisper-cpp  (macOS)")
+    print("    Then use: --whisper local  or set WATCH_WHISPER_BACKEND=local")
+    print("")
+    print(f"  Option B — cloud API. Edit {CONFIG_FILE} and set either:")
     print("    GROQ_API_KEY=...    (preferred — cheaper, faster; get one at console.groq.com/keys)")
     print("    OPENAI_API_KEY=...  (fallback; get one at platform.openai.com/api-keys)")
     print("")
-    print("  Without a key, /watch still works but videos without captions come back frames-only.")
+    print("  Without either option, /watch still works but videos without captions come back frames-only.")
     return 3
 
 

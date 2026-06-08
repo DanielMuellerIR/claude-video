@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Transcribe a video via Groq or OpenAI Whisper API.
+"""Transcribe a video via Groq or OpenAI Whisper API, or local whisper.cpp.
 
-Strategy: extract audio (mono 16kHz mp3, tiny payload), upload to whichever
-API has a key. Returns segments in the same shape as transcribe.parse_vtt so
-the rest of the pipeline (filter_range, format_transcript) doesn't care where
-the transcript came from.
+Strategy: extract audio, then either:
+  - local backend: run whisper-cli locally via whisper.cpp (no API key needed)
+  - groq / openai backend: upload mono 16kHz mp3 to the Whisper cloud API
+
+Returns segments in the same shape as transcribe.parse_vtt so the rest of the
+pipeline (filter_range, format_transcript) doesn't care where the transcript
+came from.
 
 Pure stdlib — no `pip install groq` or `pip install openai` needed.
+
+Local backend configuration (env vars):
+  WATCH_WHISPER_BACKEND=local   force local backend (no API key required)
+  WATCH_WHISPER_MODEL=<name>    whisper.cpp model name, default: large-v3-turbo
+  WATCH_WHISPER_MODELS_DIR=<p>  models cache dir, default: ~/.cache/yt-transcribe/models
 """
 from __future__ import annotations
 
@@ -20,6 +28,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -31,12 +40,25 @@ GROQ_MODEL = "whisper-large-v3"
 OPENAI_ENDPOINT = "https://api.openai.com/v1/audio/transcriptions"
 OPENAI_MODEL = "whisper-1"
 
+# Local whisper.cpp backend — model downloaded from Hugging Face on first use.
+# Mirrors the defaults used by the yt-transcribe skill.
+_LOCAL_HF_BASE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+_LOCAL_DEFAULT_MODEL = "large-v3-turbo"
+_LOCAL_DEFAULT_MODELS_DIR = Path.home() / ".cache" / "yt-transcribe" / "models"
+
 
 def load_api_key(preferred: str | None = None) -> tuple[str, str] | tuple[None, None]:
     """Return (backend, api_key). Prefers Groq, falls back to OpenAI.
 
     If `preferred` is "groq" or "openai", only that backend's key is considered.
+    If `preferred` is "local", or the env var WATCH_WHISPER_BACKEND=local is set,
+    returns ("local", "local") immediately — no API key needed.
     """
+    # Local backend: no API key needed, just whisper-cli on PATH.
+    env_backend = os.environ.get("WATCH_WHISPER_BACKEND", "").strip().lower()
+    if preferred == "local" or env_backend == "local":
+        return "local", "local"
+
     def _from_env(name: str) -> str | None:
         value = os.environ.get(name)
         return value.strip() if value else None
@@ -107,6 +129,170 @@ def extract_audio(video_path: str, out_path: Path) -> Path:
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise SystemExit("ffmpeg produced no audio — video may have no audio track")
     return out_path
+
+
+def extract_audio_wav(video_path: str, out_path: Path) -> Path:
+    """Extract 16kHz mono PCM-S16LE WAV — the format whisper.cpp expects.
+
+    Distinct from extract_audio() which produces mp3 for the cloud APIs.
+    """
+    if shutil.which("ffmpeg") is None:
+        raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        "-i", str(Path(video_path).resolve()),
+        "-vn",
+        "-ar", "16000",
+        "-ac", "1",
+        "-c:a", "pcm_s16le",
+        str(out_path.resolve()),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise SystemExit(f"ffmpeg WAV extraction failed: {result.stderr.strip()}")
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise SystemExit("ffmpeg produced no WAV — video may have no audio track")
+    return out_path
+
+
+def ensure_model_local(model: str | None = None) -> Path:
+    """Ensure the ggml model binary is present; download from Hugging Face if needed.
+
+    Returns the local path to ggml-<model>.bin.
+    """
+    if not model:
+        model = os.environ.get("WATCH_WHISPER_MODEL", _LOCAL_DEFAULT_MODEL).strip()
+    models_dir_env = os.environ.get("WATCH_WHISPER_MODELS_DIR", "")
+    models_dir = Path(models_dir_env).expanduser() if models_dir_env else _LOCAL_DEFAULT_MODELS_DIR
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    path = models_dir / f"ggml-{model}.bin"
+    if path.exists() and path.stat().st_size > 0:
+        return path
+
+    url = f"{_LOCAL_HF_BASE}/ggml-{model}.bin"
+    print(f"[watch] downloading whisper.cpp model '{model}' from Hugging Face (first run only)…",
+          file=sys.stderr)
+
+    def _progress(blocks: int, block_size: int, total: int) -> None:
+        if total > 0:
+            pct = min(100, blocks * block_size * 100 // total)
+            print(f"\r  {pct:3d}%", end="", file=sys.stderr, flush=True)
+
+    tmp = path.with_suffix(".part")
+    try:
+        urllib.request.urlretrieve(url, tmp, _progress)
+        print("", file=sys.stderr)
+        tmp.rename(path)
+    except Exception as exc:
+        if tmp.exists():
+            tmp.unlink()
+        raise SystemExit(f"[watch] model download failed ({url}): {exc}") from exc
+    return path
+
+
+def _find_whisper_cli() -> str | None:
+    """Return the first whisper.cpp binary name found on PATH, or None.
+
+    whisper.cpp has been shipped under several names across versions/packages:
+      whisper-cli  (current brew formula: whisper-cpp ≥ 1.7)
+      main         (older builds from source)
+      whisper      (some Linux distro packages)
+    """
+    for name in ("whisper-cli", "main", "whisper"):
+        if shutil.which(name):
+            return name
+    return None
+
+
+def _segments_from_whisper_cpp_json(data: dict) -> list[dict]:
+    """Convert whisper.cpp JSON output to the {start, end, text} segment format.
+
+    whisper.cpp JSON shape:
+      {"transcription": [{"offsets": {"from": <ms>, "to": <ms>}, "text": "…"}, …]}
+
+    offsets are in MILLISECONDS — divide by 1000 to get seconds.
+    """
+    out: list[dict] = []
+    for seg in data.get("transcription") or []:
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        offsets = seg.get("offsets") or {}
+        start_sec = round(float(offsets.get("from", 0)) / 1000.0, 2)
+        end_sec = round(float(offsets.get("to", 0)) / 1000.0, 2)
+        out.append({"start": start_sec, "end": end_sec, "text": text})
+    return out
+
+
+def transcribe_local(video_path: str, audio_out: Path) -> tuple[list[dict], str]:
+    """Transcribe locally using whisper.cpp — no API key, no network after model download.
+
+    Returns (segments, "local").
+    """
+    binary = _find_whisper_cli()
+    if binary is None:
+        raise SystemExit(
+            "whisper-cli not found. Install whisper.cpp:\n"
+            "  macOS:  brew install whisper-cpp\n"
+            "  Linux:  build from source: https://github.com/ggerganov/whisper.cpp\n"
+            "          make -j && sudo cp build/bin/whisper-cli /usr/local/bin/"
+        )
+
+    model_path = ensure_model_local()
+
+    # Use a WAV path next to the requested audio_out (different extension).
+    wav_path = audio_out.with_suffix(".wav")
+    print(f"[watch] extracting audio for local whisper.cpp…", file=sys.stderr)
+    extract_audio_wav(video_path, wav_path)
+    size_kb = wav_path.stat().st_size / 1024
+    print(f"[watch] audio: {size_kb:.0f} kB — running local whisper.cpp ({binary})…",
+          file=sys.stderr)
+
+    # JSON output file: whisper-cli appends .json to the -of base name.
+    json_base = audio_out.with_suffix("")  # strip any extension; -of is a path base
+    json_file = Path(str(json_base) + ".json")
+
+    threads = str(max(4, (os.cpu_count() or 4)))
+    cmd = [
+        binary,
+        "-m", str(model_path),
+        "-f", str(wav_path),
+        "-of", str(json_base),
+        "-oj",          # write JSON output
+        "-t", threads,
+        "-l", "auto",   # auto-detect language
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise SystemExit(f"whisper.cpp failed (exit {result.returncode}):\n{result.stderr.strip()}")
+
+    if not json_file.exists():
+        raise SystemExit(f"whisper.cpp produced no JSON output (expected: {json_file})")
+
+    try:
+        data = json.loads(json_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise SystemExit(f"whisper.cpp JSON unreadable: {exc}") from exc
+
+    segments = _segments_from_whisper_cpp_json(data)
+    if not segments:
+        raise SystemExit("whisper.cpp returned no transcript segments")
+
+    # Clean up temporary files.
+    for tmp in (wav_path, json_file):
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+    print(f"[watch] transcribed {len(segments)} segments via local whisper.cpp", file=sys.stderr)
+    return segments, "local"
 
 
 def _build_multipart(fields: dict[str, str], file_path: Path) -> tuple[bytes, str]:
@@ -276,11 +462,16 @@ def transcribe_video(
         backend = backend or detected_backend
         api_key = api_key or detected_key
 
+    # Local whisper.cpp path — no API key required.
+    if backend == "local":
+        return transcribe_local(video_path, audio_out)
+
     if not backend or not api_key:
         setup_py = Path(__file__).resolve().parent / "setup.py"
         raise SystemExit(
             "No Whisper API key available. Set GROQ_API_KEY (preferred) or OPENAI_API_KEY "
-            "in the environment or in ~/.config/watch/.env. "
+            "in the environment or in ~/.config/watch/.env, or set WATCH_WHISPER_BACKEND=local "
+            "to use a local whisper.cpp installation. "
             f"Run `python3 {setup_py}` to configure."
         )
 
@@ -306,7 +497,7 @@ def transcribe_video(
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("usage: whisper.py <video-path> [<audio-out.mp3>] [--backend groq|openai]", file=sys.stderr)
+        print("usage: whisper.py <video-path> [<audio-out.mp3>] [--backend groq|openai|local]", file=sys.stderr)
         raise SystemExit(2)
 
     video = sys.argv[1]

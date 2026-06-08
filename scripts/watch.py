@@ -40,9 +40,10 @@ def main() -> int:
     )
     ap.add_argument(
         "--whisper",
-        choices=["groq", "openai"],
+        choices=["groq", "openai", "local"],
         default=None,
-        help="Force a specific Whisper backend. Default: prefer Groq, fall back to OpenAI.",
+        help="Force a specific Whisper backend. Default: prefer Groq, fall back to OpenAI. "
+             "Use 'local' to transcribe with a local whisper.cpp installation (no API key needed).",
     )
     args = ap.parse_args()
 
@@ -134,8 +135,10 @@ def main() -> int:
         else:
             hint = (
                 f"--whisper {args.whisper} was set but the matching API key is missing"
-                if args.whisper else
+                if args.whisper and args.whisper != "local" else
                 "no subtitles and no Whisper API key found"
+                if not args.whisper else
+                "--whisper local was set but whisper-cli is not on PATH"
             )
             setup_py = SCRIPT_DIR / "setup.py"
             print(

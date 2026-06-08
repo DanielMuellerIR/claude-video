@@ -31,7 +31,7 @@ On non-zero exit, follow the table:
 | Exit | Meaning | Action |
 |------|---------|--------|
 | `2` | Missing binaries (`ffmpeg` / `ffprobe` / `yt-dlp`) | Run installer |
-| `3` | No Whisper API key | Run installer to scaffold `.env`, then ask user for a key |
+| `3` | No Whisper backend (no API key and no whisper-cli) | Run installer; ask user for an API key or suggest installing whisper-cli for local mode |
 | `4` | Both missing | Run installer, then ask for a key |
 
 The installer is idempotent — safe to re-run:
@@ -42,7 +42,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/setup.py"
 
 On macOS with Homebrew, it auto-installs `ffmpeg` and `yt-dlp`. On Linux/Windows, it prints the exact install commands for the user to run. It scaffolds `~/.config/watch/.env` with commented placeholders at `0600` perms, and writes `SETUP_COMPLETE=true` once deps + a key are in place so the next session knows this user has already been through the wizard.
 
-**If an API key is still missing after install:** use `AskUserQuestion` to ask the user whether they have a Groq API key (preferred — cheaper, faster) or an OpenAI key. Then write it into `~/.config/watch/.env` — set the matching `GROQ_API_KEY=...` or `OPENAI_API_KEY=...` line. If they don't want to set up Whisper, proceed with `--no-whisper` and tell them videos without native captions will come back frames-only.
+**If a Whisper backend is still missing after install:** use `AskUserQuestion` to ask the user whether they have a Groq API key (preferred — cheaper, faster) or an OpenAI key, or whether they want to use local whisper.cpp. For a cloud key, write it into `~/.config/watch/.env` — set the matching `GROQ_API_KEY=...` or `OPENAI_API_KEY=...` line. For local mode, suggest `brew install whisper-cpp` (macOS) and tell them to pass `--whisper local` or set `WATCH_WHISPER_BACKEND=local`. If they don't want to configure Whisper at all, proceed with `--no-whisper` and tell them videos without native captions will come back frames-only.
 
 **Structured mode (optional):** `python3 "${CLAUDE_SKILL_DIR}/scripts/setup.py" --json` emits `{status, first_run, missing_binaries, whisper_backend, has_api_key, config_file, platform}` where `status` is one of `ready | needs_install | needs_key | needs_install_and_key`. Use this when you need to branch on specifics (e.g. "is this the user's very first run?" → `first_run: true`).
 
@@ -81,7 +81,7 @@ Optional flags:
 - `--resolution W` — change frame width in px (default 512; bump to 1024 only if the user needs to read on-screen text)
 - `--fps F` — override auto-fps (clamped to 2 fps max)
 - `--out-dir DIR` — keep working files somewhere specific (default: an auto-generated tmp dir)
-- `--whisper groq|openai` — force a specific Whisper backend (default: prefer Groq if both keys exist)
+- `--whisper groq|openai|local` — force a specific Whisper backend. Use `local` to transcribe with a local whisper.cpp installation (no API key needed; see "Local backend" below).
 - `--no-whisper` — disable the Whisper fallback entirely (frames-only if no captions)
 
 ### Focusing on a section (higher frame rate)
@@ -125,14 +125,45 @@ If the user asked a specific question, answer it directly citing timestamps. If 
 
 ## Transcription
 
-The script gets a timestamped transcript in one of two ways:
+The script gets a timestamped transcript in one of three ways:
 
 1. **Native captions (free, preferred).** yt-dlp pulls manual or auto-generated subtitles from the source platform if available.
-2. **Whisper API fallback.** If no captions came back (or the source is a local file), the script extracts audio (`ffmpeg -vn -ac 1 -ar 16000 -b:a 64k`, ~0.5 MB/min) and uploads it to whichever Whisper API has a key configured:
+2. **Local whisper.cpp backend (offline, no API key).** If `whisper-cli` is on your PATH, pass `--whisper local` (or set `WATCH_WHISPER_BACKEND=local`) to transcribe entirely on your machine. The model is downloaded from Hugging Face on first use and cached. See "Local backend" below.
+3. **Whisper cloud API fallback.** If no captions came back (or the source is a local file), the script extracts audio (`ffmpeg -vn -ac 1 -ar 16000 -b:a 64k`, ~0.5 MB/min) and uploads it to whichever Whisper API has a key configured:
    - **Groq** — `whisper-large-v3`. Preferred default: cheaper, faster. Get a key at console.groq.com/keys.
    - **OpenAI** — `whisper-1`. Fallback. Get a key at platform.openai.com/api-keys.
 
-Both keys live in `~/.config/watch/.env`. The script prefers Groq when both are set; override with `--whisper openai` to force OpenAI. Use `--no-whisper` to skip the fallback entirely.
+Both cloud keys live in `~/.config/watch/.env`. The script prefers Groq when both are set; override with `--whisper openai` to force OpenAI. Use `--no-whisper` to skip the fallback entirely.
+
+### Local backend
+
+Requirements: `whisper-cli` (or `main` / `whisper` for older builds) on PATH.
+
+```bash
+# macOS
+brew install whisper-cpp
+
+# Linux — build from source
+git clone https://github.com/ggerganov/whisper.cpp && cd whisper.cpp
+make -j && sudo cp build/bin/whisper-cli /usr/local/bin/
+```
+
+Invoke:
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/watch.py" "<source>" --whisper local
+```
+
+Or set permanently:
+
+```bash
+export WATCH_WHISPER_BACKEND=local
+```
+
+On first use the script downloads `ggml-large-v3-turbo.bin` (~600 MB) from Hugging Face into `~/.cache/yt-transcribe/models/`. Subsequent runs reuse the cached model. Customisation:
+
+- `WATCH_WHISPER_MODEL=<name>` — any whisper.cpp ggml model name (e.g. `medium`, `small`, `large-v3`)
+- `WATCH_WHISPER_MODELS_DIR=<path>` — override the cache directory (default: `~/.cache/yt-transcribe/models`)
 
 ## Failure modes and handling
 
