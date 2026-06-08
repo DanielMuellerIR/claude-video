@@ -15,7 +15,7 @@ Codex / generic skills:
 git clone https://github.com/bradautomates/claude-video.git ~/.codex/skills/watch
 ```
 
-Zero config to start — `yt-dlp` and `ffmpeg` install on first run via `brew` on macOS (Linux/Windows print exact commands). Captions cover most public videos for free. Whisper API key is only needed when a video has no captions.
+Zero config to start — `yt-dlp` and `ffmpeg` install on first run via `brew` on macOS (Linux/Windows print exact commands). Captions cover most public videos for free. A Whisper API key is only needed for the cloud fallback (`--whisper groq|openai`); the local backend (`--whisper local`) runs entirely offline with no key and no length limit.
 
 ---
 
@@ -26,6 +26,16 @@ With Claude Video `/watch` you can paste a URL or a local path, ask a question, 
 ```
 /watch https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?
 ```
+
+## What this fork adds
+
+This repository is a fork of [bradautomates/claude-video](https://github.com/bradautomates/claude-video) by Bradley Bonanno (MIT license). The original work is unchanged and fully credited.
+
+- **Local whisper.cpp backend** (`--whisper local` / `WATCH_WHISPER_BACKEND=local`): transcribes entirely on your machine using [whisper.cpp](https://github.com/ggerganov/whisper.cpp). No API key, no network traffic after the one-time model download, no length limit — arbitrarily long videos work offline. Setup instructions: `SKILL.md` → "Local backend".
+- **Automatic long-video handling**: the local path has no hard size limit; for cloud backends (Groq / OpenAI), audio longer than ~50 min is auto-split into time-based chunks with `ffmpeg`, each chunk is transcribed, and the results are merged with correct time offsets. No manual `--start`/`--end` required.
+- **YouTube URL normalization**: playlist and tracking parameters (`list`, `index`, `pp`, `si`, …) are stripped to the canonical `watch?v=ID` form, and `--no-playlist` is passed to `yt-dlp`, so pasting a Watch-Later or playlist URL fetches only the single intended video.
+
+---
 
 ## Why this exists
 
@@ -123,8 +133,9 @@ Captions cover the majority of public videos for free. The Whisper fallback only
 | Capability | What you need | Cost |
 |------------|---------------|------|
 | Download + native captions | `yt-dlp` + `ffmpeg` | Free |
-| Whisper fallback (preferred) | [Groq API key](https://console.groq.com/keys) — `whisper-large-v3` | Cheap, fast |
-| Whisper fallback (alt) | [OpenAI API key](https://platform.openai.com/api-keys) — `whisper-1` | Standard pricing |
+| Whisper local (`--whisper local`) | [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — no API key, offline, no length limit | Free (CPU/GPU time) |
+| Whisper cloud — preferred (`--whisper groq`) | [Groq API key](https://console.groq.com/keys) — `whisper-large-v3` | Cheap, fast |
+| Whisper cloud — alt (`--whisper openai`) | [OpenAI API key](https://platform.openai.com/api-keys) — `whisper-1` | Standard pricing |
 | Disable Whisper entirely | `--no-whisper` | Free, frames-only when no captions |
 
 ## Usage
@@ -148,7 +159,7 @@ Other knobs (passed to `scripts/watch.py`):
 - `--max-frames N` — lower the frame cap for a tighter token budget.
 - `--resolution W` — bump frame width to 1024 px when Claude needs to read on-screen text (slides, terminals, code).
 - `--fps F` — override the auto-fps calculation (still capped at 2 fps).
-- `--whisper groq|openai` — force a specific Whisper backend.
+- `--whisper local|groq|openai` — force a specific Whisper backend (`local` = offline whisper.cpp, no key, no length limit).
 - `--no-whisper` — disable transcription entirely; frames only.
 - `--out-dir DIR` — keep working files somewhere specific (default: auto-generated tmp dir).
 
@@ -189,12 +200,6 @@ bash scripts/build-skill.sh      # → dist/watch.skill
 Releasing: tag `vX.Y.Z`, push the tag. The workflow builds `dist/watch.skill` and attaches it to the GitHub release.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history.
-
-## Fork — local whisper.cpp backend
-
-This repository is a fork of [bradautomates/claude-video](https://github.com/bradautomates/claude-video) (original author: Bradley Bonanno, MIT license). The original work is unchanged and fully credited.
-
-**What this fork adds:** a `--whisper local` backend that transcribes entirely on your machine using [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — no API key, no network traffic after the one-time model download. The cloud Groq/OpenAI path is preserved as the fallback. See `SKILL.md` → "Local backend" for setup instructions.
 
 ---
 
