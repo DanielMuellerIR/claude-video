@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
-"""Probe video metadata and extract frames at an auto-scaled fps.
+"""Probe video metadata and extract frames.
 
-Auto-fps targets a frame budget, not a fixed rate. Token cost scales with frame
-count, so budget-by-duration keeps short videos dense and long videos capped.
-When a user-specified range is passed, focused-mode budgets denser (they are
-zooming in for detail).
+Extraction strategy:
+  1. SCENE-CHANGE detection via ffmpeg `select='gt(scene,thr)'` — grabs one
+     frame per slide/screen transition.  Timestamps are parsed from showinfo
+     stderr (pts_time field).  Up to MAX_SCENE_FRAMES kept; if more arrive we
+     keep the most evenly spread set.
+  2. FALLBACK: if scene detection yields fewer than MIN_SCENE_FRAMES (<5) the
+     old uniform-fps approach is used so the result is never empty on static /
+     talking-head videos.
+  3. CLASSIFICATION (optional, --no-classify to skip): each frame is sent to a
+     local vision LLM via ~/git/localtool/tools/llm_run.py.  Frames classified
+     VERWERFEN are deleted from disk.  Any connectivity error is caught and
+     classification is silently skipped (all frames kept).
 """
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +26,11 @@ from pathlib import Path
 
 
 MAX_FPS = 2.0
+MAX_SCENE_FRAMES = 60   # Obergrenze für Szenen-Frames vor dem Ausdünnen
+MIN_SCENE_FRAMES = 5    # Untergrenze; darunter → Fallback auf gleichmäßiges Sampling
+
+# Pfad zu llm_run.py (absolut, damit er von jedem cwd aus gefunden wird)
+_LLM_RUN = Path.home() / "git" / "localtool" / "tools" / "llm_run.py"
 
 
 def _clamp_fps(fps: float, duration_seconds: float, max_frames: int) -> tuple[float, int]:
@@ -131,15 +146,124 @@ def auto_fps_focus(duration_seconds: float, max_frames: int = 100) -> tuple[floa
     return _clamp_fps(target / duration_seconds, duration_seconds, max_frames)
 
 
+# ── Szenen-Erkennung ──────────────────────────────────────────────────────────
+
+def _parse_pts_times(showinfo_stderr: str) -> list[float]:
+    """Extrahiert pts_time-Werte aus der showinfo-Ausgabe von ffmpeg.
+
+    showinfo schreibt Zeilen wie:
+      [Parsed_showinfo_1 @ …] n:   0 pts:   512 pts_time:0.512 …
+    Wir lesen alle pts_time-Werte heraus.
+    """
+    times: list[float] = []
+    for m in re.finditer(r"pts_time:(\d+(?:\.\d+)?)", showinfo_stderr):
+        times.append(float(m.group(1)))
+    return times
+
+
+def _pick_spread(timestamps: list[float], n: int) -> list[float]:
+    """Wählt n möglichst gleichmäßig verteilte Zeitstempel aus der Liste aus."""
+    if len(timestamps) <= n:
+        return timestamps
+    # Einfaches gleichmäßiges Ausdünnen: jeden k-ten Eintrag behalten
+    step = len(timestamps) / n
+    indices = {int(i * step) for i in range(n)}
+    return [timestamps[i] for i in sorted(indices)]
+
+
+def extract_scene(
+    video_path: str,
+    out_dir: Path,
+    resolution: int = 1600,
+    scene_threshold: float = 0.3,
+    max_frames: int = MAX_SCENE_FRAMES,
+    start_seconds: float | None = None,
+    end_seconds: float | None = None,
+) -> list[dict] | None:
+    """Extrahiert Frames an Szenenübergängen.
+
+    Gibt None zurück, wenn zu wenige Szenen erkannt wurden (→ Fallback).
+    Gibt eine Liste von Frame-Dicts zurück bei Erfolg.
+    """
+    if shutil.which("ffmpeg") is None:
+        raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for existing in out_dir.glob("frame_*.jpg"):
+        existing.unlink()
+
+    # Erster Durchlauf: nur Zeitstempel sammeln (kein Bild-Output, sehr schnell)
+    probe_cmd: list[str] = ["ffmpeg", "-hide_banner", "-y"]
+    if start_seconds is not None:
+        probe_cmd += ["-ss", f"{start_seconds:.3f}"]
+    if end_seconds is not None:
+        probe_cmd += ["-to", f"{end_seconds:.3f}"]
+    probe_cmd += [
+        "-i", str(Path(video_path).resolve()),
+        "-vf", f"select='gt(scene,{scene_threshold})',showinfo",
+        "-fps_mode", "passthrough",   # neueres Äquivalent zu -vsync vfr
+        "-f", "null",
+        "-",
+    ]
+
+    probe = subprocess.run(probe_cmd, capture_output=True, text=True)
+    # ffmpeg schreibt showinfo nach stderr; exit-Code ist 0 auch bei 0 Szenen
+    timestamps = _parse_pts_times(probe.stderr)
+
+    # Offset durch -ss korrigieren: pts_time ist relativ zum Clip-Start nach -ss
+    offset = start_seconds or 0.0
+    timestamps = [t + offset for t in timestamps]
+
+    if len(timestamps) < MIN_SCENE_FRAMES:
+        # Zu wenige Szenen → Fallback signalisieren
+        return None
+
+    # Ausdünnen auf MAX_SCENE_FRAMES
+    kept_times = _pick_spread(timestamps, max_frames)
+
+    # Zweiter Durchlauf: Frames an den ausgewählten Zeitstempeln extrahieren
+    frames: list[dict] = []
+    for idx, ts in enumerate(sorted(kept_times)):
+        out_path = out_dir / f"frame_{idx:04d}.jpg"
+        frame_cmd: list[str] = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{ts:.3f}",
+            "-i", str(Path(video_path).resolve()),
+            # 'min(resolution,iw)' verhindert Hochskalieren über die Quellbreite
+            "-vf", f"scale='min({resolution},iw)':-2",
+            "-frames:v", "1",
+            "-q:v", "4",
+            str(out_path),
+        ]
+        result = subprocess.run(frame_cmd, capture_output=True, text=True)
+        if result.returncode == 0 and out_path.exists():
+            frames.append({
+                "index": idx,
+                "timestamp_seconds": round(ts, 2),
+                "path": str(out_path),
+                "scene_detected": True,
+            })
+        else:
+            print(
+                f"[frames] Warnung: Frame bei t={ts:.2f}s konnte nicht extrahiert werden",
+                file=sys.stderr,
+            )
+
+    return frames if frames else None
+
+
+# ── Gleichmäßiges Sampling (Fallback) ────────────────────────────────────────
+
 def extract(
     video_path: str,
     out_dir: Path,
     fps: float,
-    resolution: int = 512,
+    resolution: int = 1600,
     max_frames: int = 100,
     start_seconds: float | None = None,
     end_seconds: float | None = None,
 ) -> list[dict]:
+    """Extrahiert Frames gleichmäßig verteilt (klassisches fps-Sampling)."""
     if shutil.which("ffmpeg") is None:
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
@@ -155,7 +279,7 @@ def extract(
         "-y",
     ]
 
-    # -ss before -i = fast seek (keyframe-snap, good enough for preview frames).
+    # -ss vor -i = schneller Seek (Keyframe-Snap, reicht für Vorschau-Frames)
     if start_seconds is not None:
         cmd += ["-ss", f"{start_seconds:.3f}"]
     if end_seconds is not None:
@@ -163,7 +287,8 @@ def extract(
 
     cmd += [
         "-i", str(Path(video_path).resolve()),
-        "-vf", f"fps={fps},scale={resolution}:-2",
+        # 'min(resolution,iw)' verhindert Hochskalieren über die Quellbreite
+        "-vf", f"fps={fps},scale='min({resolution},iw)':-2",
         "-frames:v", str(max_frames),
         "-q:v", "4",
         output_pattern,
@@ -180,16 +305,174 @@ def extract(
             "index": i,
             "timestamp_seconds": round(offset + (i / fps if fps > 0 else 0.0), 2),
             "path": str(p),
+            "scene_detected": False,
         }
         for i, p in enumerate(frames)
     ]
 
 
+# ── Vision-Klassifikation ─────────────────────────────────────────────────────
+
+def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int]:
+    """Klassifiziert Frames mit einem lokalen Vision-LLM.
+
+    Frames, die als reine Sprecherkopf-/Logo-/Deko-Aufnahme klassifiziert
+    werden (VERWERFEN), werden von der Festplatte gelöscht.
+
+    Gibt (kept_frames, n_kept, n_deleted) zurück.
+    Falls llm_run.py nicht erreichbar ist oder ein Fehler auftritt, werden
+    alle Frames behalten und eine Warnung ausgegeben.
+    """
+    if not _LLM_RUN.exists():
+        print(
+            f"[frames] Klassifikation übersprungen: {_LLM_RUN} nicht gefunden",
+            file=sys.stderr,
+        )
+        return frames, len(frames), 0
+
+    kept: list[dict] = []
+    deleted = 0
+    prompt = (
+        "Zeigt dieses Bild primär Bildschirminhalt/Slide/Code/Text/Diagramm "
+        "(nützlich) oder nur eine sprechende Person/Gesicht/Logo/Deko "
+        "(unbrauchbar)? Antworte mit EINEM Wort: NÜTZLICH oder VERWERFEN."
+    )
+
+    for frame in frames:
+        frame_path = frame["path"]
+        if not Path(frame_path).exists():
+            kept.append(frame)
+            continue
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(_LLM_RUN),
+                    "HOST",
+                    "--model", "gemma4:12b",
+                    "--no-think",
+                    "--image", frame_path,
+                    prompt,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,  # 60 s pro Frame sollte großzügig sein
+            )
+            answer = result.stdout.strip().upper()
+            # Robuste Auswertung: "VERWERFEN" muss im Output erscheinen
+            if "VERWERFEN" in answer:
+                os.remove(frame_path)
+                deleted += 1
+                print(
+                    f"[frames] VERWERFEN  t={format_time(frame['timestamp_seconds'])} "
+                    f"({frame_path})",
+                    file=sys.stderr,
+                )
+            else:
+                kept.append(frame)
+                print(
+                    f"[frames] NÜTZLICH   t={format_time(frame['timestamp_seconds'])} "
+                    f"({frame_path})",
+                    file=sys.stderr,
+                )
+        except subprocess.TimeoutExpired:
+            print(
+                f"[frames] Klassifikation-Timeout für {frame_path} — Frame behalten",
+                file=sys.stderr,
+            )
+            kept.append(frame)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[frames] Klassifikations-Fehler ({exc}) — alle verbleibenden Frames behalten",
+                file=sys.stderr,
+            )
+            # Restliche Frames unklassifiziert behalten
+            kept.append(frame)
+            # Verbleibende Frames direkt durchreichen
+            remaining_idx = frames.index(frame) + 1
+            kept.extend(frames[remaining_idx:])
+            break
+
+    return kept, len(kept), deleted
+
+
+# ── Haupt-API ─────────────────────────────────────────────────────────────────
+
+def extract_smart(
+    video_path: str,
+    out_dir: Path,
+    fps: float,
+    resolution: int = 1600,
+    max_frames: int = 60,
+    start_seconds: float | None = None,
+    end_seconds: float | None = None,
+    scene_threshold: float = 0.3,
+    no_classify: bool = False,
+) -> tuple[list[dict], dict]:
+    """Hauptfunktion: Szenen-Erkennung mit Fallback, dann optionale Klassifikation.
+
+    Gibt (kept_frames, stats) zurück.  stats enthält Diagnoseinformationen für
+    den watch.py-Report.
+    """
+    stats: dict = {
+        "method": "scene",
+        "scene_threshold": scene_threshold,
+        "raw_count": 0,
+        "kept_count": 0,
+        "deleted_count": 0,
+        "classified": not no_classify,
+    }
+
+    # Szenen-Erkennung versuchen
+    scene_frames = extract_scene(
+        video_path, out_dir,
+        resolution=resolution,
+        scene_threshold=scene_threshold,
+        max_frames=max_frames,
+        start_seconds=start_seconds,
+        end_seconds=end_seconds,
+    )
+
+    if scene_frames is None:
+        # Fallback: gleichmäßiges Sampling
+        print(
+            "[frames] Szenen-Erkennung ergab zu wenige Treffer — "
+            "Fallback auf gleichmäßiges Sampling",
+            file=sys.stderr,
+        )
+        stats["method"] = "uniform_fallback"
+        frames = extract(
+            video_path, out_dir,
+            fps=fps,
+            resolution=resolution,
+            max_frames=max_frames,
+            start_seconds=start_seconds,
+            end_seconds=end_seconds,
+        )
+    else:
+        frames = scene_frames
+
+    stats["raw_count"] = len(frames)
+
+    if no_classify or not frames:
+        stats["kept_count"] = len(frames)
+        stats["deleted_count"] = 0
+        return frames, stats
+
+    # Vision-Klassifikation
+    kept, n_kept, n_deleted = classify_frames(frames)
+    stats["kept_count"] = n_kept
+    stats["deleted_count"] = n_deleted
+    return kept, stats
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print(
             "usage: frames.py <video-path> <out-dir> [--fps F] [--resolution W] "
-            "[--max-frames N] [--start T] [--end T]",
+            "[--max-frames N] [--start T] [--end T] [--scene-threshold F] [--no-classify]",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -199,10 +482,12 @@ if __name__ == "__main__":
     args = sys.argv[3:]
 
     fps_override = None
-    resolution = 512
-    max_frames = 100
+    resolution = 1600
+    max_frames = 60
     start_arg = None
     end_arg = None
+    scene_threshold = 0.3
+    no_classify = False
     i = 0
     while i < len(args):
         if args[i] == "--fps":
@@ -215,6 +500,10 @@ if __name__ == "__main__":
             start_arg = args[i + 1]; i += 2
         elif args[i] == "--end":
             end_arg = args[i + 1]; i += 2
+        elif args[i] == "--scene-threshold":
+            scene_threshold = float(args[i + 1]); i += 2
+        elif args[i] == "--no-classify":
+            no_classify = True; i += 1
         else:
             i += 1
 
@@ -236,15 +525,24 @@ if __name__ == "__main__":
         fps = fps_override
         target = max(1, int(round(fps * effective_duration)))
 
-    frames = extract(
+    frames, stats = extract_smart(
         video, out,
         fps=fps,
         resolution=resolution,
         max_frames=max_frames,
         start_seconds=start_sec,
         end_seconds=end_sec,
+        scene_threshold=scene_threshold,
+        no_classify=no_classify,
     )
     print(json.dumps(
-        {"meta": meta, "fps": fps, "target": target, "focused": focused, "frames": frames},
+        {
+            "meta": meta,
+            "fps": fps,
+            "target": target,
+            "focused": focused,
+            "frames": frames,
+            "extraction_stats": stats,
+        },
         indent=2,
     ))

@@ -118,7 +118,7 @@ def download_url(url: str, out_dir: Path) -> dict:
     cmd = [
         "yt-dlp",
         "-N", "8",
-        "-f", "bv*[height<=720]+ba/b[height<=720]/bv+ba/b",
+        "-f", "bv*[height<=1080]+ba/b[height<=1080]/bv+ba/b",
         "--merge-output-format", "mp4",
         "--write-info-json",
         "--write-subs",

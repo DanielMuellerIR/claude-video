@@ -34,6 +34,7 @@ This repository is a fork of [bradautomates/claude-video](https://github.com/bra
 - **Local whisper.cpp backend** (`--whisper local` / `WATCH_WHISPER_BACKEND=local`): transcribes entirely on your machine using [whisper.cpp](https://github.com/ggerganov/whisper.cpp). No API key, no network traffic after the one-time model download, no length limit — arbitrarily long videos work offline. Setup instructions: `SKILL.md` → "Local backend".
 - **Automatic long-video handling**: the local path has no hard size limit; for cloud backends (Groq / OpenAI), audio longer than ~50 min is auto-split into time-based chunks with `ffmpeg`, each chunk is transcribed, and the results are merged with correct time offsets. No manual `--start`/`--end` required.
 - **YouTube URL normalization**: playlist and tracking parameters (`list`, `index`, `pp`, `si`, …) are stripped to the canonical `watch?v=ID` form, and `--no-playlist` is passed to `yt-dlp`, so pasting a Watch-Later or playlist URL fetches only the single intended video.
+- **Smarter, higher-resolution frames**: video is fetched at up to 1080p and frames are extracted at ~1600px (instead of 512px, so on-screen text and code are actually readable), chosen by `ffmpeg` scene-change detection (one frame per slide/screen transition rather than blind time-sampling), and an optional local-model classifier (gemma via Ollama) drops pure talking-head frames and deletes them from disk. The result is fewer, sharper, more relevant frames.
 
 ---
 

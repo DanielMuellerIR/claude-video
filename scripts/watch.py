@@ -16,7 +16,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from download import download, is_url, normalize_yt_url  # noqa: E402
-from frames import MAX_FPS, auto_fps, auto_fps_focus, extract, format_time, get_metadata, parse_time  # noqa: E402
+from frames import MAX_FPS, MAX_SCENE_FRAMES, auto_fps, auto_fps_focus, extract_smart, format_time, get_metadata, parse_time  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 from whisper import load_api_key, transcribe_video  # noqa: E402
 
@@ -27,9 +27,15 @@ def main() -> int:
         description="Download a video, extract auto-scaled frames, and surface the transcript.",
     )
     ap.add_argument("source", help="Video URL or local file path")
-    ap.add_argument("--max-frames", type=int, default=80, help="Cap on frame count (default 80, hard max 100)")
-    ap.add_argument("--resolution", type=int, default=512, help="Frame width in pixels (default 512)")
-    ap.add_argument("--fps", type=float, default=None, help="Override auto-fps")
+    ap.add_argument("--max-frames", type=int, default=60, help="Cap on frame count (default 60, hard max 100)")
+    ap.add_argument("--resolution", type=int, default=1600, help="Frame width in pixels (default 1600)")
+    ap.add_argument("--fps", type=float, default=None, help="Override auto-fps (only used in fallback uniform mode)")
+    ap.add_argument("--scene-threshold", type=float, default=0.3, help="Scene-change sensitivity 0..1 (default 0.3)")
+    ap.add_argument(
+        "--no-classify",
+        action="store_true",
+        help="Skip vision classification; keep all extracted frames.",
+    )
     ap.add_argument("--start", type=str, default=None, help="Range start (SS, MM:SS, or HH:MM:SS)")
     ap.add_argument("--end", type=str, default=None, help="Range end (SS, MM:SS, or HH:MM:SS)")
     ap.add_argument("--out-dir", type=str, default=None, help="Working directory (default: tmp)")
@@ -48,6 +54,7 @@ def main() -> int:
     args = ap.parse_args()
 
     max_frames = min(args.max_frames, 100)
+    scene_threshold = args.scene_threshold
 
     if args.out_dir:
         work = Path(args.out_dir).expanduser().resolve()
@@ -96,9 +103,12 @@ def main() -> int:
         f"{format_time(effective_start)}-{format_time(effective_end)} ({effective_duration:.1f}s)"
         if focused else f"full {effective_duration:.1f}s"
     )
-    print(f"[watch] extracting ~{target} frames at {fps:.3f} fps over {scope}…", file=sys.stderr)
+    print(
+        f"[watch] extracting frames (scene-threshold={scene_threshold}) over {scope}…",
+        file=sys.stderr,
+    )
 
-    frames = extract(
+    frames, extraction_stats = extract_smart(
         video_path,
         work / "frames",
         fps=fps,
@@ -106,6 +116,8 @@ def main() -> int:
         max_frames=max_frames,
         start_seconds=start_sec,
         end_seconds=end_sec,
+        scene_threshold=scene_threshold,
+        no_classify=args.no_classify,
     )
 
     transcript_segments: list[dict] = []
@@ -168,7 +180,14 @@ def main() -> int:
     if meta.get("width") and meta.get("height"):
         print(f"- **Resolution:** {meta['width']}x{meta['height']} ({meta.get('codec') or 'unknown codec'})")
     mode = "focused" if focused else "full"
-    print(f"- **Frames:** {len(frames)} @ {fps:.3f} fps, {mode} mode (budget {target}, max {max_frames})")
+    method = extraction_stats.get("method", "scene")
+    raw = extraction_stats.get("raw_count", len(frames))
+    deleted = extraction_stats.get("deleted_count", 0)
+    classified_note = "" if args.no_classify else f", {deleted} deleted by classifier"
+    print(
+        f"- **Frames:** {len(frames)} kept ({raw} raw, {mode} mode, "
+        f"method={method}{classified_note}, max {max_frames})"
+    )
     print(f"- **Frame size:** {args.resolution}px wide")
     if transcript_segments:
         in_range = " in range" if focused else ""
