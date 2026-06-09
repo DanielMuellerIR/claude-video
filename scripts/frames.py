@@ -10,9 +10,10 @@ Extraction strategy:
      old uniform-fps approach is used so the result is never empty on static /
      talking-head videos.
   3. CLASSIFICATION (optional, --no-classify to skip): each frame is sent to a
-     local vision LLM via ~/git/localtool/tools/llm_run.py.  Frames classified
-     VERWERFEN are deleted from disk.  Any connectivity error is caught and
-     classification is silently skipped (all frames kept).
+     local vision-LLM helper, configured through the LLM_RUN and LLM_HOST
+     environment variables.  Frames classified VERWERFEN are deleted from disk.
+     Any connectivity error is caught and classification is silently skipped
+     (all frames kept).
 """
 from __future__ import annotations
 
@@ -29,8 +30,10 @@ MAX_FPS = 2.0
 MAX_SCENE_FRAMES = 60   # Obergrenze für Szenen-Frames vor dem Ausdünnen
 MIN_SCENE_FRAMES = 5    # Untergrenze; darunter → Fallback auf gleichmäßiges Sampling
 
-# Pfad zu llm_run.py (absolut, damit er von jedem cwd aus gefunden wird)
-_LLM_RUN = Path.home() / "git" / "localtool" / "tools" / "llm_run.py"
+# Pfad zum llm_run-Helper und Ziel-Host — über Umgebungsvariablen konfigurieren.
+# Wenn eine der beiden Variablen leer ist, wird die Klassifikation übersprungen.
+_LLM_RUN = os.environ.get("LLM_RUN", "")
+_LLM_HOST = os.environ.get("LLM_HOST", "")
 
 
 def _clamp_fps(fps: float, duration_seconds: float, max_frames: int) -> tuple[float, int]:
@@ -323,9 +326,10 @@ def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int]:
     Falls llm_run.py nicht erreichbar ist oder ein Fehler auftritt, werden
     alle Frames behalten und eine Warnung ausgegeben.
     """
-    if not _LLM_RUN.exists():
+    # Beide Env-Vars müssen gesetzt sein, sonst ist keine Verbindung möglich.
+    if not _LLM_RUN or not _LLM_HOST:
         print(
-            f"[frames] Klassifikation übersprungen: {_LLM_RUN} nicht gefunden",
+            "[frames] Klassifikation übersprungen: LLM_RUN oder LLM_HOST nicht gesetzt",
             file=sys.stderr,
         )
         return frames, len(frames), 0
@@ -347,8 +351,8 @@ def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int]:
             result = subprocess.run(
                 [
                     sys.executable,
-                    str(_LLM_RUN),
-                    "HOST",
+                    _LLM_RUN,
+                    _LLM_HOST,
                     "--model", "gemma4:12b",
                     "--no-think",
                     "--image", frame_path,
