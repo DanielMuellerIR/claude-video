@@ -152,7 +152,6 @@ def download_url(url: str, out_dir: Path) -> dict:
             info = {
                 "title": raw.get("title"),
                 "uploader": raw.get("uploader") or raw.get("channel"),
-                "duration": raw.get("duration"),
                 "url": raw.get("webpage_url") or url,
             }
         except Exception as exc:

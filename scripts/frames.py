@@ -363,8 +363,11 @@ def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int]:
                 timeout=60,  # 60 s pro Frame sollte großzügig sein
             )
             answer = result.stdout.strip().upper()
-            # Robuste Auswertung: "VERWERFEN" muss im Output erscheinen
-            if "VERWERFEN" in answer:
+            # Strenger Match: nur löschen, wenn die Antwort exakt "VERWERFEN" ist
+            # (oder als erstes Token steht). "nicht VERWERFEN" o. ä. würde sonst
+            # fälschlicherweise zum Löschen führen.
+            first_token = answer.split()[0] if answer.split() else ""
+            if first_token == "VERWERFEN":
                 os.remove(frame_path)
                 deleted += 1
                 print(
@@ -420,7 +423,6 @@ def extract_smart(
     """
     stats: dict = {
         "method": "scene",
-        "scene_threshold": scene_threshold,
         "raw_count": 0,
         "kept_count": 0,
         "deleted_count": 0,

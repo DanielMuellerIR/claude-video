@@ -16,7 +16,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from download import download, is_url, normalize_yt_url  # noqa: E402
-from frames import MAX_FPS, MAX_SCENE_FRAMES, auto_fps, auto_fps_focus, extract_smart, format_time, get_metadata, parse_time  # noqa: E402
+from frames import MAX_FPS, auto_fps, auto_fps_focus, extract_smart, format_time, get_metadata, parse_time  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 from whisper import load_api_key, transcribe_video  # noqa: E402
 
@@ -53,7 +53,8 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    max_frames = min(args.max_frames, 100)
+    # Wertebereich sicherstellen: mindestens 1 Frame, maximal 100
+    max_frames = max(1, min(args.max_frames, 100))
     scene_threshold = args.scene_threshold
 
     if args.out_dir:
