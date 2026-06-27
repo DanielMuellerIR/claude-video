@@ -78,7 +78,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/watch.py" "<source>"
 Optional flags:
 - `--start T` / `--end T` — focus on a section. Accepts `SS`, `MM:SS`, or `HH:MM:SS`. When either is set, fps auto-scales denser (see "Focusing on a section" below).
 - `--max-frames N` — lower the cap for tighter token budget (e.g. `--max-frames 40`)
-- `--resolution W` — change frame width in px (default 512; bump to 1024 only if the user needs to read on-screen text)
+- `--resolution W` — change frame width in px (default 1600, sized so on-screen text stays readable; lower to 512 to save tokens when fine detail isn't needed)
 - `--fps F` — override auto-fps (clamped to 2 fps max)
 - `--out-dir DIR` — keep working files somewhere specific (default: an auto-generated tmp dir)
 - `--whisper groq|openai|local` — force a specific Whisper backend. Use `local` to transcribe with a local whisper.cpp installation (no API key needed; see "Local backend" below).
@@ -106,8 +106,8 @@ Examples:
 # Last 10 seconds of a 1 minute video
 python3 "${CLAUDE_SKILL_DIR}/scripts/watch.py" video.mp4 --start 50 --end 60
 
-# Zoom into 2:15 → 2:45 at 3 fps (90 frames)
-python3 "${CLAUDE_SKILL_DIR}/scripts/watch.py" "$URL" --start 2:15 --end 2:45 --fps 3
+# Zoom into 2:15 → 2:45 at the 2 fps cap (60 frames)
+python3 "${CLAUDE_SKILL_DIR}/scripts/watch.py" "$URL" --start 2:15 --end 2:45 --fps 2
 
 # From 1h12m to the end of the video
 python3 "${CLAUDE_SKILL_DIR}/scripts/watch.py" "$URL" --start 1:12:00
@@ -176,9 +176,9 @@ On first use the script downloads `ggml-large-v3-turbo.bin` (~600 MB) from Huggi
 ## Token efficiency
 
 This skill burns tokens primarily on frames. Order of magnitude:
-- 80 frames at 512px wide is roughly 50-80k image tokens depending on aspect ratio.
+- Each frame is one image; image tokens scale with the rendered pixel area, so 80 frames at the default 1600px wide is a sizable chunk of context (well over 100k image tokens for a batch this size).
 - The transcript is cheap (a few thousand tokens at most for a 10-minute video).
-- Bumping `--resolution` to 1024 roughly quadruples the image tokens per frame. Only do it when necessary.
+- Lowering `--resolution` to 512 cuts the image tokens per frame substantially. Do it when fine on-screen detail isn't needed.
 
 If you already watched a video this session and the user asks a follow-up, do **not** re-run the script — you already have the frames and transcript in context. Just answer from what you have.
 
@@ -199,6 +199,6 @@ If you already watched a video this session and the user asks a follow-up, do **
 - Does not log, cache, or write API keys to stdout, stderr, or output files
 - Does not persist anything outside the working directory and `~/.config/watch/.env` — clean up the working directory when you're done (Step 5)
 
-**Bundled scripts:** `scripts/watch.py` (entry point), `scripts/download.py` (yt-dlp wrapper), `scripts/frames.py` (ffmpeg frame extraction), `scripts/transcribe.py` (caption selection + Whisper orchestration), `scripts/whisper.py` (Groq / OpenAI clients), `scripts/setup.py` (preflight + installer)
+**Bundled scripts:** `scripts/watch.py` (entry point), `scripts/download.py` (yt-dlp wrapper), `scripts/frames.py` (ffmpeg frame extraction), `scripts/transcribe.py` (VTT caption parsing + range filtering), `scripts/whisper.py` (Groq / OpenAI clients), `scripts/setup.py` (preflight + installer)
 
 Review scripts before first use to verify behavior.

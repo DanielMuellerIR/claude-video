@@ -58,7 +58,7 @@ Claude is great at reading and synthesizing — but until now, video was the one
 
 1. **You paste a video and a question.** URL (anything yt-dlp supports — YouTube, Loom, TikTok, X, Instagram, plus a few hundred more) or a local path (`.mp4`, `.mov`, `.mkv`, `.webm`).
 2. **`yt-dlp` downloads it.** For URLs, into a temp working directory. For local files, no download — just probed in place.
-3. **`ffmpeg` extracts frames at an auto-scaled rate.** The frame budget is duration-aware: ≤30s gets ~30 frames, 30-60s gets ~40, 1-3min gets ~60, 3-10min gets ~80, longer gets 100 sparsely. Hard ceilings: 2 fps, 100 frames. JPEGs at 512px wide by default — bump with `--resolution 1024` if Claude needs to read on-screen text.
+3. **`ffmpeg` extracts frames at an auto-scaled rate.** The frame budget is duration-aware: ≤30s gets ~30 frames, 30-60s gets ~40, 1-3min gets ~60, 3-10min gets ~80, longer gets 100 sparsely. Hard ceilings: 2 fps, 100 frames. JPEGs at 1600px wide by default (so on-screen text and code stay readable) — lower with `--resolution 512` to save tokens when fine detail isn't needed.
 4. **The transcript comes from one of two places.** First try: `yt-dlp` pulls native captions (manual or auto-generated) from the source. Free, instant, accurate-ish. Fallback: extract a mono 16 kHz audio clip and ship it to Whisper — Groq's `whisper-large-v3` (preferred — cheaper and faster) or OpenAI's `whisper-1`.
 5. **Frames + transcript are handed to Claude.** The script prints frame paths with `t=MM:SS` markers and the transcript with timestamps. Claude `Read`s each frame in parallel — JPEGs render directly as images in its context.
 6. **Claude answers grounded in what's actually on screen and in the audio.** Not "based on the description" or "according to the title." It saw the frames. It heard the transcript. It answers the way someone who watched the video would.
@@ -158,7 +158,7 @@ Focused on a specific section — denser frame budget, lower token cost:
 Other knobs (passed to `scripts/watch.py`):
 
 - `--max-frames N` — lower the frame cap for a tighter token budget.
-- `--resolution W` — bump frame width to 1024 px when Claude needs to read on-screen text (slides, terminals, code).
+- `--resolution W` — frame width in px (default 1600, sized so on-screen text stays readable); lower to 512 to save tokens when fine detail isn't needed.
 - `--fps F` — override the auto-fps calculation (still capped at 2 fps).
 - `--whisper local|groq|openai` — force a specific Whisper backend (`local` = offline whisper.cpp, no key, no length limit).
 - `--no-whisper` — disable transcription entirely; frames only.
@@ -181,7 +181,7 @@ Other knobs (passed to `scripts/watch.py`):
 │   ├── watch.py             # entry point — orchestrates download → frames → transcript
 │   ├── download.py          # yt-dlp wrapper
 │   ├── frames.py            # ffmpeg frame extraction + auto-fps logic
-│   ├── transcribe.py        # VTT parsing + dedupe + Whisper orchestration
+│   ├── transcribe.py        # VTT parsing + dedupe + range filtering
 │   ├── whisper.py           # Groq / OpenAI clients (pure stdlib)
 │   ├── setup.py             # preflight + installer
 │   └── build-skill.sh       # build dist/watch.skill for claude.ai upload
