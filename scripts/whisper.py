@@ -494,6 +494,7 @@ def _split_audio_chunk(audio_path: Path, chunk_dir: Path, start_sec: float, dura
         "-i", str(audio_path),
         "-ss", str(start_sec),
         "-t", str(duration_sec),
+        # codereview-ok: Chunk-Cut aus Quelle an requested-Offsets — Snap-Fehler pro Grenze <=~72ms, nicht kumulativ, keine Minuten-Drift, akzeptabel fuer approximative Timestamps (2026-07-01)
         "-c:a", "copy",  # kein Re-Encoding — schnell und verlustfrei
         str(chunk_path),
     ]

@@ -93,12 +93,12 @@ def main() -> int:
     focused = start_sec is not None or end_sec is not None
 
     if focused:
-        fps, target = auto_fps_focus(effective_duration, max_frames=max_frames)
+        # auto_fps_focus liefert (fps, target); target wird hier nicht gebraucht (nur fps).
+        fps, _ = auto_fps_focus(effective_duration, max_frames=max_frames)
     else:
-        fps, target = auto_fps(effective_duration, max_frames=max_frames)
+        fps, _ = auto_fps(effective_duration, max_frames=max_frames)
     if args.fps is not None:
         fps = min(args.fps, MAX_FPS)
-        target = max(1, int(round(fps * effective_duration)))
 
     scope = (
         f"{format_time(effective_start)}-{format_time(effective_end)} ({effective_duration:.1f}s)"

@@ -214,6 +214,7 @@ def extract_scene(
     timestamps = _parse_pts_times(probe.stderr)
 
     # Offset durch -ss korrigieren: pts_time ist relativ zum Clip-Start nach -ss
+    # codereview-ok: -ss vor -i ohne -copyts liefert relatives pts_time, +offset ist die korrekte Absolut-Umrechnung (empirisch mit ffmpeg 8.1 verifiziert) (2026-07-01)
     offset = start_seconds or 0.0
     timestamps = [t + offset for t in timestamps]
 

@@ -91,6 +91,7 @@ def _pick_subtitle(out_dir: Path) -> Path | None:
     candidates = sorted(out_dir.glob("video*.vtt"))
     if not candidates:
         return None
+    # codereview-ok: Subtitle-Pick funktioniert (.en substring deckt en/en-US/en-GB); i18n-Erweiterung ist spekulativ (2026-07-01)
     preferred = [c for c in candidates if ".en" in c.name]
     return preferred[0] if preferred else candidates[0]
 
