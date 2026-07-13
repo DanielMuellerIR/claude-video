@@ -33,3 +33,15 @@ die **Portierung** hierher, sauber entkoppelt:
    Eigenwerbung) headless absichern.
 
 Ziel: Die Textframe-Funktion ist danach Teil dieses öffentlichen Repos statt nur intern.
+
+## Verzeichnisstruktur
+
+<!-- directory-structure: generated -->
+- [AGENTS.md](AGENTS.md) — Projektprofil, Arbeitsregeln und dieses Datei-Verzeichnis.
+- [CHANGELOG.md](CHANGELOG.md) — Projektdokumentation.
+- [README.md](README.md) — Projekt-Einstieg und Nutzerdokumentation.
+- [SKILL.md](SKILL.md) — Projektdokumentation.
+- `commands/` — Projektbestandteil; Details stehen im Code bzw. in der verlinkten Dokumentation.
+- `hooks/` — Projektbestandteil; Details stehen im Code bzw. in der verlinkten Dokumentation.
+- `scripts/` — Projektbestandteil; Details stehen im Code bzw. in der verlinkten Dokumentation.
+<!-- /directory-structure -->
