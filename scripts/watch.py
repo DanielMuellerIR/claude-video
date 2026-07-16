@@ -82,10 +82,22 @@ def main() -> int:
 
     if start_sec is not None and start_sec < 0:
         raise SystemExit("--start must be non-negative")
+    # Negatives oder Null-Ende ist immer sinnlos — früh und laut abbrechen,
+    # sonst würde filter_range später still ein leeres/volles Transkript liefern.
+    if end_sec is not None and end_sec <= 0:
+        raise SystemExit("--end must be positive")
     if end_sec is not None and start_sec is not None and end_sec <= start_sec:
         raise SystemExit("--end must be greater than --start")
     if full_duration > 0 and start_sec is not None and start_sec >= full_duration:
         raise SystemExit(f"--start {start_sec:.1f}s is past end of video ({full_duration:.1f}s)")
+    # --end hinter dem Videoende auf die reale Länge kürzen: sonst wird das
+    # Frame-Budget auf eine viel zu lange Range berechnet (zu wenige Frames).
+    if end_sec is not None and full_duration > 0 and end_sec > full_duration:
+        print(
+            f"[watch] --end {end_sec:.1f}s is past end of video — clamping to {full_duration:.1f}s",
+            file=sys.stderr,
+        )
+        end_sec = full_duration
 
     effective_start = start_sec if start_sec is not None else 0.0
     effective_end = end_sec if end_sec is not None else full_duration

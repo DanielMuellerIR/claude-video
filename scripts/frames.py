@@ -222,7 +222,8 @@ def extract_scene(
         # Zu wenige Szenen → Fallback signalisieren
         return None
 
-    # Ausdünnen auf MAX_SCENE_FRAMES
+    # Ausdünnen auf max_frames
+    # codereview-ok: max_frames ist der bewusste User-Cap (watch.py: default 60, hard max 100); MAX_SCENE_FRAMES ist nur der Default-Parameter, kein harter Deckel (2026-07-16)
     kept_times = _pick_spread(timestamps, max_frames)
 
     # Zweiter Durchlauf: Frames an den ausgewählten Zeitstempeln extrahieren
@@ -343,7 +344,9 @@ def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int]:
         "(unbrauchbar)? Antworte mit EINEM Wort: NÜTZLICH oder VERWERFEN."
     )
 
-    for frame in frames:
+    # enumerate liefert die Position gleich mit — der Exception-Handler unten
+    # braucht sie, um die restlichen Frames ohne fragile index()-Suche zu behalten.
+    for frame_pos, frame in enumerate(frames):
         frame_path = frame["path"]
         if not Path(frame_path).exists():
             kept.append(frame)
@@ -397,8 +400,7 @@ def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int]:
             # Restliche Frames unklassifiziert behalten
             kept.append(frame)
             # Verbleibende Frames direkt durchreichen
-            remaining_idx = frames.index(frame) + 1
-            kept.extend(frames[remaining_idx:])
+            kept.extend(frames[frame_pos + 1:])
             break
 
     return kept, len(kept), deleted

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import mimetypes
 import os
 import shutil
@@ -551,8 +552,9 @@ def _transcribe_cloud_chunked(
     if max_chunk_sec < 10:
         max_chunk_sec = 10  # Mindest-Chunk-Länge: 10 Sekunden
 
-    # Anzahl der Chunks
-    num_chunks = int(total_duration / max_chunk_sec) + 1
+    # Anzahl der Chunks: aufrunden, damit die Anzeige zur Schleife unten passt.
+    # (int(x) + 1 wäre bei exakten Vielfachen von max_chunk_sec um 1 zu hoch.)
+    num_chunks = max(1, math.ceil(total_duration / max_chunk_sec))
     print(
         f"[watch] audio zu lang für direkt-Upload ({file_size / 1024:.0f} kB / "
         f"{total_duration / 60:.1f} min) — wird in {num_chunks} Chunks aufgeteilt…",
