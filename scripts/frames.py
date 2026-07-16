@@ -223,7 +223,8 @@ def extract_scene(
         return None
 
     # Ausdünnen auf max_frames
-    # codereview-ok: max_frames ist der bewusste User-Cap (watch.py: default 60, hard max 100); MAX_SCENE_FRAMES ist nur der Default-Parameter, kein harter Deckel (2026-07-16)
+    # max_frames ist der bewusste User-Cap (watch.py: Standard 60, hartes
+    # Maximum 100); MAX_SCENE_FRAMES ist nur der Default, kein harter Deckel.
     kept_times = _pick_spread(timestamps, max_frames)
 
     # Zweiter Durchlauf: Frames an den ausgewählten Zeitstempeln extrahieren
