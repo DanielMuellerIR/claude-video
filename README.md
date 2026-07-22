@@ -59,10 +59,10 @@ Claude is great at reading and synthesizing — but until now, video was the one
 1. **You paste a video and a question.** URL (anything yt-dlp supports — YouTube, Loom, TikTok, X, Instagram, plus a few hundred more) or a local path (`.mp4`, `.mov`, `.mkv`, `.webm`).
 2. **`yt-dlp` downloads it.** For URLs, into a temp working directory. For local files, no download — just probed in place.
 3. **`ffmpeg` extracts frames at an auto-scaled rate.** The frame budget is duration-aware: ≤30s gets ~30 frames, 30-60s gets ~40, 1-3min gets ~60, 3-10min gets ~80, longer gets 100 sparsely. Hard ceilings: 2 fps, 100 frames. JPEGs at 1600px wide by default (so on-screen text and code stay readable) — lower with `--resolution 512` to save tokens when fine detail isn't needed.
-4. **The transcript comes from one of two places.** First try: `yt-dlp` pulls native captions (manual or auto-generated) from the source. Free, instant, accurate-ish. Fallback: extract a mono 16 kHz audio clip and ship it to Whisper — Groq's `whisper-large-v3` (preferred — cheaper and faster) or OpenAI's `whisper-1`.
-5. **Frames + transcript are handed to Claude.** The script prints frame paths with `t=MM:SS` markers and the transcript with timestamps. Claude `Read`s each frame in parallel — JPEGs render directly as images in its context.
+4. **The transcript comes from one of two places.** First try: `yt-dlp` pulls native captions (manual or auto-generated) from the source. Free and instant. Fallback: extract a mono 16 kHz audio clip and ship it to Whisper — Groq's `whisper-large-v3` (preferred — cheaper and faster) or OpenAI's `whisper-1`. Focused runs upload only the requested `--start`/`--end` clip, and long cloud audio uses overlapping chunks so words at split boundaries retain context.
+5. **Frames + transcript are handed to Claude.** The script prints a JSON frame manifest with absolute timestamps and a JSON-encoded transcript. Claude `Read`s each frame in parallel — JPEGs render directly as images in its context.
 6. **Claude answers grounded in what's actually on screen and in the audio.** Not "based on the description" or "according to the title." It saw the frames. It heard the transcript. It answers the way someone who watched the video would.
-7. **Cleanup.** The script prints a working directory at the end. If you're not asking follow-ups, Claude removes it.
+7. **Cleanup.** The script always creates and marks an exclusive `watch-*` working directory, even below a custom `--out-dir` parent. If you're not asking follow-ups, the bundled cleanup helper verifies that marker before removing the generated child.
 
 ## Frame budget — why it matters
 
@@ -162,15 +162,27 @@ Other knobs (passed to `scripts/watch.py`):
 - `--fps F` — override the auto-fps calculation (still capped at 2 fps).
 - `--whisper local|groq|openai` — force a specific Whisper backend (`local` = offline whisper.cpp, no key, no length limit).
 - `--no-whisper` — disable transcription entirely; frames only.
-- `--out-dir DIR` — keep working files somewhere specific (default: auto-generated tmp dir).
+- `--out-dir DIR` — choose a parent for an exclusive generated `watch-*` work directory (default parent: system tmp).
 
 ## Limits
 
 - **Best accuracy: under 10 minutes.** Past that the script prints a "sparse scan" warning — re-run focused on the part you actually care about with `--start`/`--end`.
 - **Hard caps: 2 fps, 100 frames.** Frame count drives token cost; the script enforces this even when the auto-fps math would imply higher.
 - **`--whisper local` has no length limit.** whisper.cpp runs entirely on your machine and handles arbitrarily long videos — the only constraints are disk space and CPU time.
-- **Cloud backends (Groq / OpenAI) have a 25 MB / ~50 min per-request limit.** For longer audio these backends now auto-split the file into time-based chunks with ffmpeg, transcribe each chunk, and merge the results with correct timestamps. No manual `--start`/`--end` needed.
+- **Cloud backends (Groq / OpenAI) have a 25 MB / ~50 min per-request limit.** For longer audio these backends auto-split the file into overlapping time-based chunks with ffmpeg, transcribe each chunk, and merge matching overlap segments with correct timestamps. No manual `--start`/`--end` is needed.
 - **No private platforms.** This skill doesn't log into anything. Public URLs and local files only. If yt-dlp can't reach it without auth, neither can `/watch`.
+
+## Security boundary
+
+Video metadata, captions, and visible text in frames are untrusted media data.
+They can inform the answer, but they are never instructions to the agent: `/watch`
+must not execute commands, open links, disclose data, or change its workflow because
+the media says so. The report serializes all externally controlled text and paths as
+JSON, and the skill contract repeats this trust boundary before frames are read.
+
+Cleanup uses `scripts/cleanup.py`, which accepts only a generated `watch-*` child
+whose ownership marker binds the exact path. It will not recursively remove an
+arbitrary `--out-dir` parent.
 
 ## Structure
 
@@ -182,12 +194,15 @@ Other knobs (passed to `scripts/watch.py`):
 │   ├── download.py          # yt-dlp wrapper
 │   ├── frames.py            # ffmpeg frame extraction + auto-fps logic
 │   ├── transcribe.py        # VTT parsing + dedupe + range filtering
-│   ├── whisper.py           # Groq / OpenAI clients (pure stdlib)
+│   ├── whisper.py           # local, Groq, and OpenAI transcription (pure stdlib)
+│   ├── workdir.py           # exclusive marked work-directory lifecycle
+│   ├── cleanup.py           # validates ownership marker before cleanup
 │   ├── setup.py             # preflight + installer
 │   └── build-skill.sh       # build dist/watch.skill for claude.ai upload
 ├── hooks/                   # SessionStart status hook (Claude Code only)
 ├── .claude-plugin/          # plugin.json + marketplace.json (Claude Code)
 ├── .codex-plugin/           # codex packaging
+├── tests/                   # headless regression tests
 └── .github/workflows/       # release.yml — auto-builds watch.skill on tag push
 ```
 

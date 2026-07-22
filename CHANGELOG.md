@@ -2,6 +2,23 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.1.6] — 2026-07-22
+
+### Security
+- `--out-dir` is now a parent for an exclusive marked `watch-*` directory; cleanup uses a marker-checking helper instead of recursive deletion of an arbitrary path.
+- Each yt-dlp invocation writes to a fresh child directory, so failed downloads cannot reuse stale video, subtitle, or metadata files.
+- Reports serialize external metadata, frame paths, and captions as untrusted JSON, and the skill contract explicitly forbids following instructions embedded in media.
+- Focused Whisper runs extract and upload only the requested audio range.
+
+### Fixed
+- Scene extraction always includes the effective range start, and duration-derived frame budgets now apply consistently up to the documented 100-frame default.
+- WebVTT parsing accepts both `MM:SS.mmm` and `HH:MM:SS.mmm`, long hour values, and cue settings.
+- Cloud audio chunks overlap and deduplicate matching boundary segments while using one absolute chunk offset.
+- Whisper backend selection is shared by runtime, setup, and the session hook with precedence `CLI > environment preference > available backend`.
+
+### Tests
+- Added headless regression coverage for all review fixes, including safe cleanup, stale-download isolation, range clipping, prompt-fence containment, scene starts, WebVTT variants, backend precedence, and chunk overlap.
+
 ## [0.1.3] — 2026-05-09
 
 ### Fixed
