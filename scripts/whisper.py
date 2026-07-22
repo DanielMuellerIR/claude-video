@@ -6,9 +6,9 @@ Strategy: extract audio, then either:
     no length limit — handles arbitrarily long videos offline)
   - groq / openai backend: upload mono 16kHz mp3 to the Whisper cloud API.
     The cloud APIs accept up to ~25 MB per request (~50 min at 64 kbps).
-    For longer audio the file is automatically split into time-based chunks,
-    each chunk is transcribed independently, and the returned segments are
-    merged with correct cumulative time offsets.
+    For longer audio the file is automatically split into overlapping chunks,
+    each chunk is transcribed independently, and matching overlap segments are
+    deduplicated on the absolute source timeline.
 
 Returns segments in the same shape as transcribe.parse_vtt so the rest of the
 pipeline (filter_range, format_transcript) doesn't care where the transcript
@@ -17,7 +17,7 @@ came from.
 Pure stdlib — no `pip install groq` or `pip install openai` needed.
 
 Local backend configuration (env vars):
-  WATCH_WHISPER_BACKEND=local   force local backend (no API key required)
+  WATCH_WHISPER_BACKEND=local   prefer local backend unless CLI overrides it
   WATCH_WHISPER_MODEL=<name>    whisper.cpp model name, default: large-v3-turbo
   WATCH_WHISPER_MODELS_DIR=<p>  models cache dir, default: ~/.cache/yt-transcribe/models
 """
@@ -28,6 +28,7 @@ import json
 import math
 import mimetypes
 import os
+import re
 import shutil
 import ssl
 import subprocess
@@ -53,75 +54,111 @@ _LOCAL_DEFAULT_MODEL = "large-v3-turbo"
 _LOCAL_DEFAULT_MODELS_DIR = Path.home() / ".cache" / "yt-transcribe" / "models"
 
 
-def load_api_key(preferred: str | None = None) -> tuple[str, str] | tuple[None, None]:
-    """Return (backend, api_key). Prefers Groq, falls back to OpenAI.
-
-    If `preferred` is "groq" or "openai", only that backend's key is considered.
-    If `preferred` is "local", or the env var WATCH_WHISPER_BACKEND=local is set,
-    returns ("local", "local") immediately — no API key needed.
-    """
-    # Local backend: no API key needed, just whisper-cli on PATH.
-    env_backend = os.environ.get("WATCH_WHISPER_BACKEND", "").strip().lower()
-    if preferred == "local" or env_backend == "local":
-        return "local", "local"
-
-    def _from_env(name: str) -> str | None:
-        value = os.environ.get(name)
-        return value.strip() if value else None
-
-    def _from_dotenv(path: Path, name: str) -> str | None:
-        if not path.exists():
-            return None
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                if key.strip() != name:
-                    continue
-                value = value.strip()
-                if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
-                    value = value[1:-1]
-                return value or None
-        except OSError:
-            return None
+def _dotenv_value(path: Path, name: str) -> str | None:
+    if not path.exists():
         return None
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key.strip() != name:
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
+                value = value[1:-1]
+            return value or None
+    except OSError:
+        return None
+    return None
 
-    dotenv_paths = [
+
+def available_whisper_backends(
+    dotenv_paths: list[Path] | None = None,
+) -> dict[str, str]:
+    """Ermittle Verfuegbarkeit getrennt von der spaeteren Auswahl."""
+    paths = dotenv_paths if dotenv_paths is not None else [
         Path.home() / ".config" / "watch" / ".env",
         Path.cwd() / ".env",
     ]
-
-    candidates = (("GROQ_API_KEY", "groq"), ("OPENAI_API_KEY", "openai"))
-    if preferred is not None:
-        candidates = tuple(c for c in candidates if c[1] == preferred)
-
-    for key_name, backend in candidates:
-        value = _from_env(key_name)
+    available: dict[str, str] = {}
+    for key_name, backend in (("GROQ_API_KEY", "groq"), ("OPENAI_API_KEY", "openai")):
+        value = os.environ.get(key_name, "").strip()
         if not value:
-            for candidate in dotenv_paths:
-                value = _from_dotenv(candidate, key_name)
+            for path in paths:
+                value = _dotenv_value(path, key_name) or ""
                 if value:
                     break
         if value:
-            return backend, value
+            available[backend] = value
+    if _find_whisper_cli() is not None:
+        available["local"] = "local"
+    return available
 
+
+def resolve_whisper_backend(
+    preferred: str | None = None,
+    dotenv_paths: list[Path] | None = None,
+) -> tuple[str, str] | tuple[None, None]:
+    """Waehle mit fester Praezedenz CLI > Env-Vorgabe > Auto-Erkennung."""
+    available = available_whisper_backends(dotenv_paths)
+    env_preferred = os.environ.get("WATCH_WHISPER_BACKEND", "").strip().lower()
+    requested = preferred or env_preferred or None
+    if requested is not None:
+        value = available.get(requested)
+        return (requested, value) if value else (None, None)
+
+    for backend in ("groq", "openai", "local"):
+        value = available.get(backend)
+        if value:
+            return backend, value
     return None, None
 
 
-def extract_audio(video_path: str, out_path: Path) -> Path:
+def load_api_key(preferred: str | None = None) -> tuple[str, str] | tuple[None, None]:
+    """Kompatibilitaets-Wrapper fuer den gemeinsamen Backend-Resolver."""
+    return resolve_whisper_backend(preferred)
+
+
+def _audio_range_args(
+    start_seconds: float | None,
+    end_seconds: float | None,
+) -> tuple[list[str], list[str]]:
+    """Liefere schnelle Input-Seeks und eine exakte Clip-Dauer fuer ffmpeg."""
+    before_input: list[str] = []
+    after_input: list[str] = []
+    start = start_seconds or 0.0
+    if start_seconds is not None:
+        before_input += ["-ss", f"{start_seconds:.3f}"]
+    if end_seconds is not None:
+        duration = end_seconds - start
+        if duration <= 0:
+            raise SystemExit("audio range end must be greater than start")
+        after_input += ["-t", f"{duration:.3f}"]
+    return before_input, after_input
+
+
+def extract_audio(
+    video_path: str,
+    out_path: Path,
+    start_seconds: float | None = None,
+    end_seconds: float | None = None,
+) -> Path:
     """Extract mono 16kHz 64kbps mp3 — ~480 kB/min, fits any Whisper limit."""
     if shutil.which("ffmpeg") is None:
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    before_input, after_input = _audio_range_args(start_seconds, end_seconds)
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel", "error",
         "-y",
+        *before_input,
         "-i", str(Path(video_path).resolve()),
+        *after_input,
         "-vn",
         "-acodec", "libmp3lame",
         "-ar", "16000",
@@ -137,7 +174,12 @@ def extract_audio(video_path: str, out_path: Path) -> Path:
     return out_path
 
 
-def extract_audio_wav(video_path: str, out_path: Path) -> Path:
+def extract_audio_wav(
+    video_path: str,
+    out_path: Path,
+    start_seconds: float | None = None,
+    end_seconds: float | None = None,
+) -> Path:
     """Extract 16kHz mono PCM-S16LE WAV — the format whisper.cpp expects.
 
     Distinct from extract_audio() which produces mp3 for the cloud APIs.
@@ -146,12 +188,15 @@ def extract_audio_wav(video_path: str, out_path: Path) -> Path:
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    before_input, after_input = _audio_range_args(start_seconds, end_seconds)
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel", "error",
         "-y",
+        *before_input,
         "-i", str(Path(video_path).resolve()),
+        *after_input,
         "-vn",
         "-ar", "16000",
         "-ac", "1",
@@ -236,7 +281,12 @@ def _segments_from_whisper_cpp_json(data: dict) -> list[dict]:
     return out
 
 
-def transcribe_local(video_path: str, audio_out: Path) -> tuple[list[dict], str]:
+def transcribe_local(
+    video_path: str,
+    audio_out: Path,
+    start_seconds: float | None = None,
+    end_seconds: float | None = None,
+) -> tuple[list[dict], str]:
     """Transcribe locally using whisper.cpp — no API key, no network after model download.
 
     Returns (segments, "local").
@@ -255,7 +305,7 @@ def transcribe_local(video_path: str, audio_out: Path) -> tuple[list[dict], str]
     # Use a WAV path next to the requested audio_out (different extension).
     wav_path = audio_out.with_suffix(".wav")
     print(f"[watch] extracting audio for local whisper.cpp…", file=sys.stderr)
-    extract_audio_wav(video_path, wav_path)
+    extract_audio_wav(video_path, wav_path, start_seconds, end_seconds)
     size_kb = wav_path.stat().st_size / 1024
     print(f"[watch] audio: {size_kb:.0f} kB — running local whisper.cpp ({binary})…",
           file=sys.stderr)
@@ -289,6 +339,17 @@ def transcribe_local(video_path: str, audio_out: Path) -> tuple[list[dict], str]
     segments = _segments_from_whisper_cpp_json(data)
     if not segments:
         raise SystemExit("whisper.cpp returned no transcript segments")
+
+    offset = start_seconds or 0.0
+    if offset:
+        segments = [
+            {
+                **segment,
+                "start": round(segment["start"] + offset, 2),
+                "end": round(segment["end"] + offset, 2),
+            }
+            for segment in segments
+        ]
 
     # Clean up temporary files.
     for tmp in (wav_path, json_file):
@@ -455,6 +516,7 @@ def _segments_from_response(data: dict) -> list[dict]:
 
 # Maximale Upload-Größe für Cloud-APIs in Bytes (~24 MB Sicherheitspuffer unter dem 25 MB Limit).
 _CLOUD_MAX_BYTES = 24 * 1024 * 1024
+_CHUNK_OVERLAP_SECONDS = 5.0
 
 
 def _get_audio_duration_seconds(audio_path: Path) -> float:
@@ -507,6 +569,56 @@ def _split_audio_chunk(audio_path: Path, chunk_dir: Path, start_sec: float, dura
     return chunk_path
 
 
+def _normalized_segment_text(text: str) -> str:
+    """Normalisiere Text fuer die Deduplizierung im Chunk-Ueberlapp."""
+    return " ".join(re.findall(r"\w+", text.casefold(), flags=re.UNICODE))
+
+
+def _merge_overlap_segments(
+    existing: list[dict],
+    incoming: list[dict],
+    overlap_start: float,
+    overlap_end: float,
+) -> list[dict]:
+    """Fuege Chunks zusammen und entferne nur zeitlich passende Text-Dubletten."""
+    merged = list(existing)
+    for segment in incoming:
+        normalized = _normalized_segment_text(segment["text"])
+        duplicate_index: int | None = None
+        if normalized and segment["start"] <= overlap_end + 1.0:
+            for index in range(len(merged) - 1, -1, -1):
+                candidate = merged[index]
+                if candidate["end"] < overlap_start - 1.0:
+                    break
+                candidate_text = _normalized_segment_text(candidate["text"])
+                same_text = (
+                    normalized == candidate_text
+                    or (len(normalized) >= 12 and normalized in candidate_text)
+                    or (len(candidate_text) >= 12 and candidate_text in normalized)
+                )
+                time_close = (
+                    segment["start"] <= candidate["end"] + 2.0
+                    and segment["end"] >= candidate["start"] - 2.0
+                )
+                if same_text and time_close:
+                    duplicate_index = index
+                    break
+
+        if duplicate_index is None:
+            merged.append(segment)
+            continue
+
+        candidate = merged[duplicate_index]
+        # Die inhaltlich reichere Variante behalten, Zeitbereich aber vereinen.
+        if len(segment["text"].strip()) > len(candidate["text"].strip()):
+            candidate["text"] = segment["text"]
+        candidate["start"] = round(min(candidate["start"], segment["start"]), 2)
+        candidate["end"] = round(max(candidate["end"], segment["end"]), 2)
+
+    merged.sort(key=lambda item: (item["start"], item["end"]))
+    return merged
+
+
 def _transcribe_cloud_chunked(
     audio_path: Path,
     endpoint: str,
@@ -518,11 +630,10 @@ def _transcribe_cloud_chunked(
     Ablauf:
     1. Bestimme die Gesamtdauer via ffprobe.
     2. Berechne die Chunk-Länge so, dass jeder Chunk unter _CLOUD_MAX_BYTES bleibt.
-    3. Schneide die Chunks mit ffmpeg (copy-Codec, kein Qualitätsverlust).
+    3. Schneide die Chunks mit einem kurzen Ueberlappungsfenster.
     4. Transkribiere jeden Chunk separat über _post_whisper.
-    5. Addiere auf die Zeitstempel jedes Chunks den kumulierten Zeitoffset aller
-       vorherigen Chunks (chunk_start_sec), damit das Ergebnis-Merge korrekte
-       absolute Zeitangaben enthält.
+    5. Addiere den absoluten chunk_start und dedupliziere den Ueberlapp anhand
+       von Zeit und normalisiertem Text.
     6. Lösche den Temp-Ordner in jedem Fall (try/finally).
 
     Gibt die zusammengeführte Segment-Liste zurück.
@@ -552,9 +663,12 @@ def _transcribe_cloud_chunked(
     if max_chunk_sec < 10:
         max_chunk_sec = 10  # Mindest-Chunk-Länge: 10 Sekunden
 
-    # Anzahl der Chunks: aufrunden, damit die Anzeige zur Schleife unten passt.
-    # (int(x) + 1 wäre bei exakten Vielfachen von max_chunk_sec um 1 zu hoch.)
-    num_chunks = max(1, math.ceil(total_duration / max_chunk_sec))
+    overlap = min(_CHUNK_OVERLAP_SECONDS, max_chunk_sec / 2.0)
+    advance = max_chunk_sec - overlap
+    if total_duration <= max_chunk_sec:
+        num_chunks = 1
+    else:
+        num_chunks = 1 + math.ceil((total_duration - max_chunk_sec) / advance)
     print(
         f"[watch] audio zu lang für direkt-Upload ({file_size / 1024:.0f} kB / "
         f"{total_duration / 60:.1f} min) — wird in {num_chunks} Chunks aufgeteilt…",
@@ -563,11 +677,11 @@ def _transcribe_cloud_chunked(
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="watch_whisper_chunks_"))
     all_segments: list[dict] = []
-    cumulative_offset = 0.0  # Summe der Dauern aller bisher transkribierten Chunks
 
     try:
         chunk_index = 0
         chunk_start = 0.0
+        previous_end = 0.0
 
         while chunk_start < total_duration:
             chunk_duration = min(max_chunk_sec, total_duration - chunk_start)
@@ -582,16 +696,31 @@ def _transcribe_cloud_chunked(
             response = _post_whisper(endpoint, api_key, model, chunk_path)
             chunk_segments = _segments_from_response(response)
 
-            # Zeitoffset auf alle Segmente dieses Chunks addieren
-            for seg in chunk_segments:
-                all_segments.append({
-                    "start": round(seg["start"] + cumulative_offset, 2),
-                    "end": round(seg["end"] + cumulative_offset, 2),
+            absolute_segments = [
+                {
+                    "start": round(seg["start"] + chunk_start, 2),
+                    "end": round(seg["end"] + chunk_start, 2),
                     "text": seg["text"],
-                })
+                }
+                for seg in chunk_segments
+            ]
+            # Der erste Chunk hat keinen Ueberlapp; spaetere werden nur in dem
+            # tatsaechlich doppelt gehoerten Zeitfenster dedupliziert.
+            if chunk_index == 0:
+                all_segments.extend(absolute_segments)
+            else:
+                all_segments = _merge_overlap_segments(
+                    all_segments,
+                    absolute_segments,
+                    overlap_start=chunk_start,
+                    overlap_end=min(previous_end, chunk_start + overlap),
+                )
 
-            cumulative_offset += chunk_duration
-            chunk_start += chunk_duration
+            chunk_end = chunk_start + chunk_duration
+            if chunk_end >= total_duration:
+                break
+            previous_end = chunk_end
+            chunk_start += max(chunk_duration - overlap, 0.001)
             chunk_index += 1
 
     finally:
@@ -609,19 +738,21 @@ def transcribe_video(
     audio_out: Path,
     backend: str | None = None,
     api_key: str | None = None,
+    start_seconds: float | None = None,
+    end_seconds: float | None = None,
 ) -> tuple[list[dict], str]:
     """Run the full flow: extract audio → upload → parse segments.
 
     Returns (segments, backend_used). Raises SystemExit on any failure.
     """
     if backend is None or api_key is None:
-        detected_backend, detected_key = load_api_key()
+        detected_backend, detected_key = load_api_key(backend)
         backend = backend or detected_backend
         api_key = api_key or detected_key
 
     # Local whisper.cpp path — no API key required.
     if backend == "local":
-        return transcribe_local(video_path, audio_out)
+        return transcribe_local(video_path, audio_out, start_seconds, end_seconds)
 
     if not backend or not api_key:
         setup_py = Path(__file__).resolve().parent / "setup.py"
@@ -633,7 +764,7 @@ def transcribe_video(
         )
 
     print(f"[watch] extracting audio for Whisper ({backend})…", file=sys.stderr)
-    audio_path = extract_audio(video_path, audio_out)
+    audio_path = extract_audio(video_path, audio_out, start_seconds, end_seconds)
     size_kb = audio_path.stat().st_size / 1024
     file_size = audio_path.stat().st_size
 
@@ -654,6 +785,17 @@ def transcribe_video(
 
     if not segments:
         raise SystemExit("Whisper returned no transcript segments")
+
+    offset = start_seconds or 0.0
+    if offset:
+        segments = [
+            {
+                **segment,
+                "start": round(segment["start"] + offset, 2),
+                "end": round(segment["end"] + offset, 2),
+            }
+            for segment in segments
+        ]
 
     print(f"[watch] transcribed {len(segments)} segments via {backend}", file=sys.stderr)
     return segments, backend

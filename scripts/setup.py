@@ -26,6 +26,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from whisper import resolve_whisper_backend
+
 
 REQUIRED_BINARIES = ["ffmpeg", "ffprobe", "yt-dlp"]
 CONFIG_DIR = Path.home() / ".config" / "watch"
@@ -105,15 +107,8 @@ def _read_env_key(name: str) -> str | None:
 
 
 def _have_api_key() -> tuple[bool, str | None]:
-    if _read_env_key("GROQ_API_KEY"):
-        return True, "groq"
-    if _read_env_key("OPENAI_API_KEY"):
-        return True, "openai"
-    # Local whisper.cpp counts as a valid transcription backend — no API key needed.
-    for binary in ("whisper-cli", "main", "whisper"):
-        if _which(binary):
-            return True, "local"
-    return False, None
+    backend, credential = resolve_whisper_backend()
+    return bool(backend and credential), backend
 
 
 def is_first_run() -> bool:
@@ -274,6 +269,25 @@ def cmd_json() -> int:
     return 0
 
 
+def cmd_hook_status() -> int:
+    """Knapper SessionStart-Status aus derselben Logik wie Laufzeit/Setup."""
+    s = _status()
+    if s["status"] == "ready":
+        return 0
+    if s["missing_binaries"]:
+        print(
+            "/watch: needs ffmpeg + yt-dlp. Run "
+            "`python3 $CLAUDE_PLUGIN_ROOT/scripts/setup.py` once to install and scaffold config."
+        )
+    else:
+        print(
+            "/watch: ready for videos with native captions. Add GROQ_API_KEY / "
+            "OPENAI_API_KEY to ~/.config/watch/.env, or install whisper-cli, to unlock "
+            "the Whisper fallback."
+        )
+    return 0
+
+
 def cmd_install() -> int:
     missing = _check_binaries()
     installed_deps = False
@@ -338,6 +352,8 @@ def main() -> int:
             return cmd_check()
         if arg == "--json":
             return cmd_json()
+        if arg == "--hook-status":
+            return cmd_hook_status()
     return cmd_install()
 
 

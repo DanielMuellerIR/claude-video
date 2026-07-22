@@ -11,14 +11,13 @@ import sys
 from pathlib import Path
 
 
-TS_RE = re.compile(
-    r"(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s+-->\s+(\d{2}):(\d{2}):(\d{2})[.,](\d{3})"
-)
+_TS_TOKEN = r"(?:(\d+):)?([0-5]\d):([0-5]\d)[.,](\d{3})"
+TS_RE = re.compile(rf"^\s*{_TS_TOKEN}\s+-->\s+{_TS_TOKEN}(?:\s+.*)?$")
 TAG_RE = re.compile(r"<[^>]+>")
 
 
-def _to_seconds(h: str, m: str, s: str, ms: str) -> float:
-    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+def _to_seconds(h: str | None, m: str, s: str, ms: str) -> float:
+    return int(h or 0) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
 
 
 def parse_vtt(path: str) -> list[dict]:

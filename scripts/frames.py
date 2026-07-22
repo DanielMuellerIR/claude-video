@@ -222,8 +222,14 @@ def extract_scene(
         # Zu wenige Szenen → Fallback signalisieren
         return None
 
+    # select=gt(scene,...) meldet nur Uebergaenge. Der Bereichsanfang ist aber
+    # oft Titelkarte oder Hook und muss unabhaengig von spaeteren Schnitten mit.
+    range_start = start_seconds or 0.0
+    if not timestamps or abs(timestamps[0] - range_start) > 0.001:
+        timestamps.insert(0, range_start)
+
     # Ausdünnen auf max_frames
-    # max_frames ist der bewusste User-Cap (watch.py: Standard 60, hartes
+    # max_frames ist das aus Dauerbudget und User-Cap berechnete Limit (hartes
     # Maximum 100); MAX_SCENE_FRAMES ist nur der Default, kein harter Deckel.
     kept_times = _pick_spread(timestamps, max_frames)
 
@@ -414,7 +420,7 @@ def extract_smart(
     out_dir: Path,
     fps: float,
     resolution: int = 1600,
-    max_frames: int = 60,
+    max_frames: int = 100,
     start_seconds: float | None = None,
     end_seconds: float | None = None,
     scene_threshold: float = 0.3,
@@ -493,7 +499,7 @@ if __name__ == "__main__":
 
     fps_override = None
     resolution = 1600
-    max_frames = 60
+    max_frames = 100
     start_arg = None
     end_arg = None
     scene_threshold = 0.3
@@ -532,14 +538,14 @@ if __name__ == "__main__":
     else:
         fps, target = auto_fps(effective_duration, max_frames=max_frames)
     if fps_override is not None:
-        fps = fps_override
-        target = max(1, int(round(fps * effective_duration)))
+        fps = min(fps_override, MAX_FPS)
+        target = min(max_frames, max(1, int(round(fps * effective_duration))))
 
     frames, stats = extract_smart(
         video, out,
         fps=fps,
         resolution=resolution,
-        max_frames=max_frames,
+        max_frames=target,
         start_seconds=start_sec,
         end_seconds=end_sec,
         scene_threshold=scene_threshold,

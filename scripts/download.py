@@ -10,6 +10,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -114,7 +115,10 @@ def download_url(url: str, out_dir: Path) -> dict:
     url = normalize_yt_url(url)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    output_template = str(out_dir / "video.%(ext)s")
+    # Jeder yt-dlp-Aufruf bekommt einen exklusiven Ordner. So koennen weder ein
+    # fehlgeschlagener Lauf noch alte video.*-/VTT-Dateien als neuer Erfolg gelten.
+    run_dir = Path(tempfile.mkdtemp(prefix="yt-", dir=out_dir))
+    output_template = str(run_dir / "video.%(ext)s")
 
     cmd = [
         "yt-dlp",
@@ -138,14 +142,15 @@ def download_url(url: str, out_dir: Path) -> dict:
     # yt-dlp may exit non-zero if a subtitle variant fails (e.g. 429) even when
     # the video itself downloaded fine. Treat "video file present" as success.
     result = subprocess.run(cmd, stdout=sys.stderr, stderr=sys.stderr)
-    video = _pick_video(out_dir)
+    video = _pick_video(run_dir)
     if video is None:
+        shutil.rmtree(run_dir, ignore_errors=True)
         raise SystemExit(
-            f"yt-dlp did not produce a video file in {out_dir} (exit {result.returncode})"
+            f"yt-dlp did not produce a video file in {run_dir} (exit {result.returncode})"
         )
 
-    subtitle = _pick_subtitle(out_dir)
-    info_path = out_dir / "video.info.json"
+    subtitle = _pick_subtitle(run_dir)
+    info_path = run_dir / "video.info.json"
     info: dict = {}
     if info_path.exists():
         try:

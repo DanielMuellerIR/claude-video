@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 .coverage
 htmlcov/
+.commit-lock
 .idea/
 .vscode/
 
