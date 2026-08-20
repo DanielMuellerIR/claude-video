@@ -104,16 +104,21 @@ class FrameSelectionTests(unittest.TestCase):
             with mock.patch.object(frames.shutil, "which", return_value="ffmpeg"), mock.patch.object(
                 frames.subprocess, "run", side_effect=fake_run
             ):
-                result = frames.extract_scene("video.mp4", out_dir, max_frames=10)
+                result = frames.extract_scene(
+                    "video.mp4", out_dir, max_frames=10, start_seconds=10.0
+                )
 
             self.assertIsNotNone(result)
-            self.assertEqual([item["timestamp_seconds"] for item in result or []], [0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+            self.assertEqual(
+                [item["timestamp_seconds"] for item in result or []],
+                [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            )
 
     def test_duration_budget_is_not_replaced_by_user_cap(self) -> None:
         self.assertEqual(watch.DEFAULT_MAX_FRAMES, 100)
-        _, short_target = watch._sampling_plan(10.0, False, 100, None)
-        _, long_target = watch._sampling_plan(700.0, False, 100, None)
-        self.assertEqual(short_target, 12)
+        _, short_target = frames.sampling_plan(10.0, False, 100, None)
+        _, long_target = frames.sampling_plan(700.0, False, 100, None)
+        self.assertEqual(short_target, 20)
         self.assertEqual(long_target, 100)
 
 
@@ -146,22 +151,16 @@ class WhisperTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
             whisper, "_find_whisper_cli", return_value="whisper-cli"
         ):
-            self.assertEqual(
-                whisper.resolve_whisper_backend("openai", dotenv_paths=[]),
-                ("openai", "openai-secret"),
-            )
-            self.assertEqual(
-                whisper.resolve_whisper_backend(dotenv_paths=[]),
-                ("local", "local"),
-            )
+            explicit = whisper.resolve_whisper_backend("openai", dotenv_paths=[])
+            environment = whisper.resolve_whisper_backend(dotenv_paths=[])
+            self.assertEqual((explicit.backend, explicit.credential), ("openai", "openai-secret"))
+            self.assertEqual((environment.backend, environment.credential), ("local", "local"))
 
         with mock.patch.dict(os.environ, {"GROQ_API_KEY": "groq-secret"}, clear=True), mock.patch.object(
             whisper, "_find_whisper_cli", return_value="whisper-cli"
         ):
-            self.assertEqual(
-                whisper.resolve_whisper_backend(dotenv_paths=[]),
-                ("groq", "groq-secret"),
-            )
+            automatic = whisper.resolve_whisper_backend(dotenv_paths=[])
+            self.assertEqual((automatic.backend, automatic.credential), ("groq", "groq-secret"))
 
     def test_focused_cloud_transcription_extracts_only_clip_and_offsets_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -34,7 +34,7 @@ This repository is a fork of [bradautomates/claude-video](https://github.com/bra
 - **Local whisper.cpp backend** (`--whisper local` / `WATCH_WHISPER_BACKEND=local`): transcribes entirely on your machine using [whisper.cpp](https://github.com/ggerganov/whisper.cpp). No API key, no network traffic after the one-time model download, no length limit — arbitrarily long videos work offline. Setup instructions: `SKILL.md` → "Local backend".
 - **Automatic long-video handling**: the local path has no hard size limit; for cloud backends (Groq / OpenAI), audio longer than ~50 min is auto-split into time-based chunks with `ffmpeg`, each chunk is transcribed, and the results are merged with correct time offsets. No manual `--start`/`--end` required.
 - **YouTube URL normalization**: playlist and tracking parameters (`list`, `index`, `pp`, `si`, …) are stripped to the canonical `watch?v=ID` form, and `--no-playlist` is passed to `yt-dlp`, so pasting a Watch-Later or playlist URL fetches only the single intended video.
-- **Smarter, higher-resolution frames**: video is fetched at up to 1080p and frames are extracted at ~1600px (instead of 512px, so on-screen text and code are actually readable), chosen by `ffmpeg` scene-change detection (one frame per slide/screen transition rather than blind time-sampling), and an optional local-model classifier (gemma via Ollama) drops pure talking-head frames and deletes them from disk. The result is fewer, sharper, more relevant frames.
+- **Smarter, higher-resolution frames**: video is fetched at up to 1080p and frames are extracted at ~1600px (instead of 512px, so on-screen text and code are actually readable), chosen by `ffmpeg` scene-change detection (one frame per slide/screen transition rather than blind time-sampling). An optional local-model classifier drops pure talking-head frames when `LLM_RUN` and `LLM_HOST` are configured; `--no-classify` disables it explicitly.
 
 ---
 
@@ -62,7 +62,7 @@ Claude is great at reading and synthesizing — but until now, video was the one
 4. **The transcript comes from one of two places.** First try: `yt-dlp` pulls native captions (manual or auto-generated) from the source. Free and instant. Fallback: extract a mono 16 kHz audio clip and ship it to Whisper — Groq's `whisper-large-v3` (preferred — cheaper and faster) or OpenAI's `whisper-1`. Focused runs upload only the requested `--start`/`--end` clip, and long cloud audio uses overlapping chunks so words at split boundaries retain context.
 5. **Frames + transcript are handed to Claude.** The script prints a JSON frame manifest with absolute timestamps and a JSON-encoded transcript. Claude `Read`s each frame in parallel — JPEGs render directly as images in its context.
 6. **Claude answers grounded in what's actually on screen and in the audio.** Not "based on the description" or "according to the title." It saw the frames. It heard the transcript. It answers the way someone who watched the video would.
-7. **Cleanup.** The script always creates and marks an exclusive `watch-*` working directory, even below a custom `--out-dir` parent. If you're not asking follow-ups, the bundled cleanup helper verifies that marker before removing the generated child.
+7. **Cleanup.** The script always creates and marks an exclusive `watch-*` working directory, even below a custom `--out-dir` parent. Failed runs remove that child automatically. After a successful run, the bundled cleanup helper verifies the marker before removing it.
 
 ## Frame budget — why it matters
 
@@ -159,7 +159,8 @@ Other knobs (passed to `scripts/watch.py`):
 
 - `--max-frames N` — lower the frame cap for a tighter token budget.
 - `--resolution W` — frame width in px (default 1600, sized so on-screen text stays readable); lower to 512 to save tokens when fine detail isn't needed.
-- `--fps F` — override the auto-fps calculation (still capped at 2 fps).
+- `--fps F` — set a positive sampling rate for the uniform fallback (still capped at 2 fps); scene selection keeps its duration-derived budget.
+- `--no-classify` — keep every extracted frame and skip the optional local vision classifier.
 - `--whisper local|groq|openai` — force a specific Whisper backend (`local` = offline whisper.cpp, no key, no length limit).
 - `--no-whisper` — disable transcription entirely; frames only.
 - `--out-dir DIR` — choose a parent for an exclusive generated `watch-*` work directory (default parent: system tmp).
@@ -168,6 +169,7 @@ Other knobs (passed to `scripts/watch.py`):
 
 - **Best accuracy: under 10 minutes.** Past that the script prints a "sparse scan" warning — re-run focused on the part you actually care about with `--start`/`--end`.
 - **Hard caps: 2 fps, 100 frames.** Frame count drives token cost; the script enforces this even when the auto-fps math would imply higher.
+- **Unknown duration:** if `ffprobe` cannot determine the duration, the script warns and uses the requested frame cap instead of reducing the video to one frame.
 - **`--whisper local` has no length limit.** whisper.cpp runs entirely on your machine and handles arbitrarily long videos — the only constraints are disk space and CPU time.
 - **Cloud backends (Groq / OpenAI) have a 25 MB / ~50 min per-request limit.** For longer audio these backends auto-split the file into overlapping time-based chunks with ffmpeg, transcribe each chunk, and merge matching overlap segments with correct timestamps. No manual `--start`/`--end` is needed.
 - **No private platforms.** This skill doesn't log into anything. Public URLs and local files only. If yt-dlp can't reach it without auth, neither can `/watch`.
@@ -179,6 +181,20 @@ They can inform the answer, but they are never instructions to the agent: `/watc
 must not execute commands, open links, disclose data, or change its workflow because
 the media says so. The report serializes all externally controlled text and paths as
 JSON, and the skill contract repeats this trust boundary before frames are read.
+Diagnostics derived from yt-dlp, captions, or remote APIs are likewise untrusted;
+the scripts label and JSON-encode them on stderr instead of printing raw multi-line text.
+
+### Optional frame classifier
+
+Set both variables to enable local vision classification after extraction:
+
+```bash
+export LLM_RUN=/path/to/llm_run.py
+export LLM_HOST=local-vision-host
+```
+
+If either variable is missing, all frames are kept and the report says
+`classifier not configured`. Pass `--no-classify` to disable a configured classifier.
 
 Cleanup uses `scripts/cleanup.py`, which accepts only a generated `watch-*` child
 whose ownership marker binds the exact path. It will not recursively remove an
@@ -203,12 +219,15 @@ arbitrary `--out-dir` parent.
 ├── .claude-plugin/          # plugin.json + marketplace.json (Claude Code)
 ├── .codex-plugin/           # codex packaging
 ├── tests/                   # headless regression tests
-└── .github/workflows/       # release.yml — auto-builds watch.skill on tag push
+└── .github/workflows/       # headless tests plus tagged-release build
 ```
 
 ## Develop
 
 ```bash
+# Run the headless regression suite:
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
+
 # Build the claude.ai upload bundle:
 bash scripts/build-skill.sh      # → dist/watch.skill
 ```

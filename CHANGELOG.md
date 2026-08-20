@@ -2,6 +2,25 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.1.7] — 2026-08-20
+
+### Fixed
+- Unknown-duration videos now use the requested frame cap; `--fps` rejects non-positive values and only controls the uniform fallback.
+- Whisper backend resolution normalizes CLI input, diagnoses unavailable choices, and falls back from invalid environment preferences when another backend is usable.
+- Setup and SessionStart report exact missing binaries, backend-selection errors, and unsafe group/other permissions on the secrets file.
+- Download selection rejects yt-dlp fragment streams, skips Whisper for videos without audio, and JSON-encodes externally controlled diagnostics.
+- Failed runs remove their exclusive work directory; invalid or empty `--out-dir` values now fail clearly or use system tmp as appropriate.
+- WebVTT accepts non-normalized minute/second fields, reports malformed timestamp lines, and formats hour-long transcript positions as `h:mm:ss`.
+- Cloud-chunk deduplication requires real interval overlap and a five-word minimum for substring matches without mutating caller-owned segments.
+- Local model names reject path traversal, and standalone scripts work with Python safe-path mode.
+
+### Changed
+- Scene thinning is time-based, preserves the range start without near-duplicate frames, and uses one shared sampling planner for both entry points.
+- Frame reports distinguish a completed classifier run from an unconfigured or explicitly disabled classifier.
+
+### Tests
+- Added headless coverage for the 2026-08-20 review findings and a push/pull-request CI workflow.
+
 ## [0.1.6] — 2026-07-22
 
 ### Security

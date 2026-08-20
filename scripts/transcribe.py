@@ -6,12 +6,17 @@ scrolls). We dedupe consecutive identical cues and merge their time ranges.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).parent.resolve()
+sys.path.insert(0, str(SCRIPT_DIR))
 
-_TS_TOKEN = r"(?:(\d+):)?([0-5]\d):([0-5]\d)[.,](\d{3})"
+from frames import format_time  # noqa: E402
+
+_TS_TOKEN = r"(?:(\d+):)?(\d{2,}):(\d{2,})[.,](\d{3})"
 TS_RE = re.compile(rf"^\s*{_TS_TOKEN}\s+-->\s+{_TS_TOKEN}(?:\s+.*)?$")
 TAG_RE = re.compile(r"<[^>]+>")
 
@@ -29,6 +34,12 @@ def parse_vtt(path: str) -> list[dict]:
     while i < len(lines):
         match = TS_RE.match(lines[i])
         if not match:
+            if "-->" in lines[i]:
+                print(
+                    "[watch] untrusted malformed caption timestamp: "
+                    f"{json.dumps(lines[i], ensure_ascii=False)}",
+                    file=sys.stderr,
+                )
             i += 1
             continue
 
@@ -82,8 +93,7 @@ def filter_range(
 def format_transcript(segments: list[dict]) -> str:
     lines = []
     for seg in segments:
-        start = int(seg["start"])
-        stamp = f"[{start // 60:02d}:{start % 60:02d}]"
+        stamp = f"[{format_time(seg['start'])}]"
         lines.append(f"{stamp} {seg['text']}")
     return "\n".join(lines)
 

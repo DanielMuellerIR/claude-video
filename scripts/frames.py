@@ -4,8 +4,8 @@
 Extraction strategy:
   1. SCENE-CHANGE detection via ffmpeg `select='gt(scene,thr)'` — grabs one
      frame per slide/screen transition.  Timestamps are parsed from showinfo
-     stderr (pts_time field).  Up to MAX_SCENE_FRAMES kept; if more arrive we
-     keep the most evenly spread set.
+     stderr (pts_time field).  The caller supplies the duration-derived frame
+     budget; if more scenes arrive, the code keeps a time-balanced subset.
   2. FALLBACK: if scene detection yields fewer than MIN_SCENE_FRAMES (<5) the
      old uniform-fps approach is used so the result is never empty on static /
      talking-head videos.
@@ -27,7 +27,6 @@ from pathlib import Path
 
 
 MAX_FPS = 2.0
-MAX_SCENE_FRAMES = 60   # Obergrenze für Szenen-Frames vor dem Ausdünnen
 MIN_SCENE_FRAMES = 5    # Untergrenze; darunter → Fallback auf gleichmäßiges Sampling
 
 # Pfad zum llm_run-Helper und Ziel-Host — über Umgebungsvariablen konfigurieren.
@@ -80,7 +79,7 @@ def get_metadata(video_path: str) -> dict:
     result = subprocess.run(
         [
             "ffprobe",
-            "-v", "quiet",
+            "-v", "error",
             "-print_format", "json",
             "-show_format",
             "-show_streams",
@@ -112,10 +111,10 @@ def get_metadata(video_path: str) -> dict:
 def auto_fps(duration_seconds: float, max_frames: int = 100) -> tuple[float, int]:
     """Pick fps that targets a sensible frame budget for full-video scans."""
     if duration_seconds <= 0:
-        return 1.0, 1
+        return 1.0, max_frames
 
     if duration_seconds <= 30:
-        target = min(max_frames, max(12, int(round(duration_seconds))))
+        target = min(max_frames, 30)
     elif duration_seconds <= 60:
         target = min(max_frames, 40)
     elif duration_seconds <= 180:  # 3 min
@@ -131,7 +130,7 @@ def auto_fps(duration_seconds: float, max_frames: int = 100) -> tuple[float, int
 def auto_fps_focus(duration_seconds: float, max_frames: int = 100) -> tuple[float, int]:
     """Denser budget for user-specified ranges — they are zooming in for detail."""
     if duration_seconds <= 0:
-        return min(MAX_FPS, 2.0), 2
+        return MAX_FPS, max_frames
 
     if duration_seconds <= 5:
         target = min(max_frames, max(10, int(round(duration_seconds * 6))))
@@ -147,6 +146,25 @@ def auto_fps_focus(duration_seconds: float, max_frames: int = 100) -> tuple[floa
         target = max_frames
 
     return _clamp_fps(target / duration_seconds, duration_seconds, max_frames)
+
+
+def sampling_plan(
+    duration_seconds: float,
+    focused: bool,
+    max_frames: int,
+    fps_override: float | None,
+) -> tuple[float, int]:
+    """Plane Szenenbudget und fps des gleichmaessigen Fallbacks gemeinsam."""
+    max_frames = max(1, min(max_frames, 100))
+    planner = auto_fps_focus if focused else auto_fps
+    fps, target_frames = planner(duration_seconds, max_frames=max_frames)
+    if fps_override is not None:
+        if fps_override <= 0:
+            raise ValueError("--fps must be greater than zero")
+        # Szenen werden nach ihrem eigenen Dauerbudget ausgewaehlt. --fps steuert
+        # nur den gleichmaessigen Fallback, wie es die CLI-Hilfe verspricht.
+        fps = min(fps_override, MAX_FPS)
+    return fps, target_frames
 
 
 # ── Szenen-Erkennung ──────────────────────────────────────────────────────────
@@ -165,21 +183,30 @@ def _parse_pts_times(showinfo_stderr: str) -> list[float]:
 
 
 def _pick_spread(timestamps: list[float], n: int) -> list[float]:
-    """Wählt n möglichst gleichmäßig verteilte Zeitstempel aus der Liste aus."""
-    if len(timestamps) <= n:
-        return timestamps
-    # Einfaches gleichmäßiges Ausdünnen: jeden k-ten Eintrag behalten
-    step = len(timestamps) / n
-    indices = {int(i * step) for i in range(n)}
-    return [timestamps[i] for i in sorted(indices)]
+    """Waehle n zeitlich statt bloss nach Listenindex verteilte Zeitstempel."""
+    if n <= 0:
+        raise ValueError("frame count must be positive")
+    ordered = sorted(dict.fromkeys(timestamps))
+    if len(ordered) <= n:
+        return ordered
+    if n == 1:
+        return [ordered[0]]
+
+    selected = {0}  # Der Bereichsanfang bleibt immer erhalten.
+    span = ordered[-1] - ordered[0]
+    for position in range(1, n):
+        target = ordered[0] + span * position / (n - 1)
+        candidates = (index for index in range(len(ordered)) if index not in selected)
+        selected.add(min(candidates, key=lambda index: abs(ordered[index] - target)))
+    return [ordered[index] for index in sorted(selected)]
 
 
 def extract_scene(
     video_path: str,
     out_dir: Path,
+    max_frames: int,
     resolution: int = 1600,
     scene_threshold: float = 0.3,
-    max_frames: int = MAX_SCENE_FRAMES,
     start_seconds: float | None = None,
     end_seconds: float | None = None,
 ) -> list[dict] | None:
@@ -225,12 +252,11 @@ def extract_scene(
     # select=gt(scene,...) meldet nur Uebergaenge. Der Bereichsanfang ist aber
     # oft Titelkarte oder Hook und muss unabhaengig von spaeteren Schnitten mit.
     range_start = start_seconds or 0.0
-    if not timestamps or abs(timestamps[0] - range_start) > 0.001:
+    if abs(timestamps[0] - range_start) > 0.5:
         timestamps.insert(0, range_start)
 
     # Ausdünnen auf max_frames
-    # max_frames ist das aus Dauerbudget und User-Cap berechnete Limit (hartes
-    # Maximum 100); MAX_SCENE_FRAMES ist nur der Default, kein harter Deckel.
+    # max_frames ist das aus Dauerbudget und User-Cap berechnete Limit.
     kept_times = _pick_spread(timestamps, max_frames)
 
     # Zweiter Durchlauf: Frames an den ausgewählten Zeitstempeln extrahieren
@@ -325,13 +351,13 @@ def extract(
 
 # ── Vision-Klassifikation ─────────────────────────────────────────────────────
 
-def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int]:
+def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int, bool]:
     """Klassifiziert Frames mit einem lokalen Vision-LLM.
 
     Frames, die als reine Sprecherkopf-/Logo-/Deko-Aufnahme klassifiziert
     werden (VERWERFEN), werden von der Festplatte gelöscht.
 
-    Gibt (kept_frames, n_kept, n_deleted) zurück.
+    Gibt (kept_frames, n_kept, n_deleted, classifier_started) zurück.
     Falls llm_run.py nicht erreichbar ist oder ein Fehler auftritt, werden
     alle Frames behalten und eine Warnung ausgegeben.
     """
@@ -341,7 +367,7 @@ def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int]:
             "[frames] Klassifikation übersprungen: LLM_RUN oder LLM_HOST nicht gesetzt",
             file=sys.stderr,
         )
-        return frames, len(frames), 0
+        return frames, len(frames), 0, False
 
     kept: list[dict] = []
     deleted = 0
@@ -410,7 +436,7 @@ def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int]:
             kept.extend(frames[frame_pos + 1:])
             break
 
-    return kept, len(kept), deleted
+    return kept, len(kept), deleted, True
 
 
 # ── Haupt-API ─────────────────────────────────────────────────────────────────
@@ -419,8 +445,8 @@ def extract_smart(
     video_path: str,
     out_dir: Path,
     fps: float,
+    max_frames: int,
     resolution: int = 1600,
-    max_frames: int = 100,
     start_seconds: float | None = None,
     end_seconds: float | None = None,
     scene_threshold: float = 0.3,
@@ -436,7 +462,7 @@ def extract_smart(
         "raw_count": 0,
         "kept_count": 0,
         "deleted_count": 0,
-        "classified": not no_classify,
+        "classified": False,
     }
 
     # Szenen-Erkennung versuchen
@@ -476,9 +502,10 @@ def extract_smart(
         return frames, stats
 
     # Vision-Klassifikation
-    kept, n_kept, n_deleted = classify_frames(frames)
+    kept, n_kept, n_deleted, classified = classify_frames(frames)
     stats["kept_count"] = n_kept
     stats["deleted_count"] = n_deleted
+    stats["classified"] = classified
     return kept, stats
 
 
@@ -533,13 +560,16 @@ if __name__ == "__main__":
     effective_duration = max(0.0, effective_end - effective_start)
 
     focused = start_sec is not None or end_sec is not None
-    if focused:
-        fps, target = auto_fps_focus(effective_duration, max_frames=max_frames)
-    else:
-        fps, target = auto_fps(effective_duration, max_frames=max_frames)
-    if fps_override is not None:
-        fps = min(fps_override, MAX_FPS)
-        target = min(max_frames, max(1, int(round(fps * effective_duration))))
+    max_frames = max(1, min(max_frames, 100))
+    try:
+        fps, target = sampling_plan(
+            effective_duration,
+            focused,
+            max_frames,
+            fps_override,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     frames, stats = extract_smart(
         video, out,

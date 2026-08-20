@@ -26,7 +26,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from whisper import resolve_whisper_backend
+SCRIPT_DIR = Path(__file__).parent.resolve()
+sys.path.insert(0, str(SCRIPT_DIR))
+
+from whisper import _dotenv_value, resolve_whisper_backend  # noqa: E402
 
 
 REQUIRED_BINARIES = ["ffmpeg", "ffprobe", "yt-dlp"]
@@ -68,47 +71,25 @@ def _check_binaries() -> list[str]:
     return [b for b in REQUIRED_BINARIES if not _which(b)]
 
 
-def _check_file_permissions(path: Path) -> None:
-    """Warn to stderr if a secrets file is world/group readable."""
+def _file_permission_warning(path: Path) -> str | None:
+    """Liefere eine Warnung, wenn Gruppe oder andere irgendein Recht haben."""
     try:
         mode = path.stat().st_mode
-        if mode & 0o044:
-            sys.stderr.write(
-                f"[watch] WARNING: {path} is readable by other users. "
-                f"Run: chmod 600 {path}\n"
+        if mode & 0o077:
+            return (
+                f"{path} permissions are too broad ({mode & 0o777:04o}); "
+                f"run: chmod 600 {path}"
             )
-            sys.stderr.flush()
     except OSError:
         pass
+    return None
 
 
 def _read_env_key(name: str) -> str | None:
     value = os.environ.get(name)
     if value and value.strip():
         return value.strip()
-    if not CONFIG_FILE.exists():
-        return None
-    _check_file_permissions(CONFIG_FILE)
-    try:
-        for line in CONFIG_FILE.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, raw = line.partition("=")
-            if key.strip() != name:
-                continue
-            raw = raw.strip()
-            if len(raw) >= 2 and raw[0] in ('"', "'") and raw[-1] == raw[0]:
-                raw = raw[1:-1]
-            return raw or None
-    except OSError:
-        return None
-    return None
-
-
-def _have_api_key() -> tuple[bool, str | None]:
-    backend, credential = resolve_whisper_backend()
-    return bool(backend and credential), backend
+    return _dotenv_value(CONFIG_FILE, name)
 
 
 def is_first_run() -> bool:
@@ -207,26 +188,54 @@ def _install_hint_windows(missing: list[str]) -> str:
 def _status() -> dict:
     """Structured preflight snapshot."""
     missing = _check_binaries()
-    has_key, backend = _have_api_key()
+    resolution = resolve_whisper_backend()
+    has_backend = bool(resolution.backend and resolution.credential)
 
-    if not missing and has_key:
-        status = "ready"
-    elif missing and not has_key:
-        status = "needs_install_and_key"
+    if not missing and has_backend:
+        status = "ready_with_backend_fallback" if resolution.reason else "ready"
+    elif missing and not has_backend:
+        status = (
+            "needs_install_and_requested_backend"
+            if resolution.requested_backend else "needs_install_and_key"
+        )
     elif missing:
-        status = "needs_install"
+        status = "needs_install_with_backend_fallback" if resolution.reason else "needs_install"
     else:
-        status = "needs_key"
+        status = "requested_backend_unavailable" if resolution.requested_backend else "needs_key"
 
     return {
         "status": status,
         "first_run": is_first_run(),
         "missing_binaries": missing,
-        "whisper_backend": backend,
-        "has_api_key": has_key,
+        "whisper_backend": resolution.backend,
+        "has_api_key": has_backend,
+        "requested_backend": resolution.requested_backend,
+        "available_backends": list(resolution.available_backends),
+        "backend_error": resolution.reason,
+        "config_permissions": _file_permission_warning(CONFIG_FILE),
         "config_file": str(CONFIG_FILE),
         "platform": platform.system(),
     }
+
+
+def _status_problems(status: dict) -> list[str]:
+    """Formuliere dieselben konkreten Ursachen fuer Check und Session-Hook."""
+    problems: list[str] = []
+    if status["missing_binaries"]:
+        problems.append(f"missing binaries: {', '.join(status['missing_binaries'])}")
+    if status["backend_error"]:
+        fallback = (
+            f"; using {status['whisper_backend']} instead"
+            if status["whisper_backend"] else ""
+        )
+        problems.append(status["backend_error"] + fallback)
+    elif not status["has_api_key"]:
+        problems.append(
+            "no Whisper backend (set GROQ_API_KEY, OPENAI_API_KEY, or install whisper-cli)"
+        )
+    if status["config_permissions"]:
+        problems.append(status["config_permissions"])
+    return problems
 
 
 def cmd_check() -> int:
@@ -239,23 +248,19 @@ def cmd_check() -> int:
       4 → both missing
     """
     s = _status()
-    if s["status"] == "ready":
+    problems = _status_problems(s)
+    if s["status"] == "ready" and not problems:
         return 0
 
-    parts = []
-    if s["missing_binaries"]:
-        parts.append(f"missing binaries: {', '.join(s['missing_binaries'])}")
-    if not s["has_api_key"]:
-        parts.append(
-            "no Whisper backend (set GROQ_API_KEY, OPENAI_API_KEY, or install whisper-cli)"
-        )
     installer = Path(__file__).resolve()
     sys.stderr.write(
-        f"[watch] setup incomplete ({'; '.join(parts)}). "
+        f"[watch] setup status ({'; '.join(problems)}). "
         f"Run: python3 {installer}\n"
     )
     sys.stderr.flush()
 
+    if not s["missing_binaries"] and s["has_api_key"]:
+        return 0
     if s["missing_binaries"] and not s["has_api_key"]:
         return 4
     if s["missing_binaries"]:
@@ -272,19 +277,13 @@ def cmd_json() -> int:
 def cmd_hook_status() -> int:
     """Knapper SessionStart-Status aus derselben Logik wie Laufzeit/Setup."""
     s = _status()
-    if s["status"] == "ready":
+    problems = _status_problems(s)
+    if not problems:
         return 0
-    if s["missing_binaries"]:
-        print(
-            "/watch: needs ffmpeg + yt-dlp. Run "
-            "`python3 $CLAUDE_PLUGIN_ROOT/scripts/setup.py` once to install and scaffold config."
-        )
-    else:
-        print(
-            "/watch: ready for videos with native captions. Add GROQ_API_KEY / "
-            "OPENAI_API_KEY to ~/.config/watch/.env, or install whisper-cli, to unlock "
-            "the Whisper fallback."
-        )
+    print(
+        f"/watch: setup status: {'; '.join(problems)}. Run "
+        "`python3 $CLAUDE_PLUGIN_ROOT/scripts/setup.py` to update the configuration."
+    )
     return 0
 
 
@@ -322,13 +321,18 @@ def cmd_install() -> int:
     else:
         print(f"[setup] config exists: {CONFIG_FILE}")
 
-    has_key, backend = _have_api_key()
-    if has_key:
+    resolution = resolve_whisper_backend()
+    if resolution.backend and resolution.credential:
         _write_setup_complete()
-        print(f"[setup] ready. whisper backend: {backend}")
+        if resolution.reason:
+            print(f"[setup] warning: {resolution.reason}; using {resolution.backend} instead")
+        print(f"[setup] ready. whisper backend: {resolution.backend}")
         if installed_deps:
             print("[setup] installed dependencies; /watch is fully set up.")
         return 0
+
+    if resolution.reason:
+        print(f"[setup] {resolution.reason}")
 
     print("")
     print("[setup] one step left: configure a Whisper transcription backend.")

@@ -7,6 +7,7 @@ transcribe.py can parse them without needing Whisper.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -64,6 +65,17 @@ def normalize_yt_url(url: str) -> str:
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".flv", ".wmv"}
 
 
+def _emit_untrusted_diagnostic(source: str, detail: object) -> None:
+    """Gib fremdgesteuerte Tool-Ausgabe als eine JSON-kodierte Zeile aus."""
+    text = str(detail).strip()
+    if text:
+        print(
+            f"[watch] untrusted {source} diagnostic: "
+            f"{json.dumps(text[:2000], ensure_ascii=False)}",
+            file=sys.stderr,
+        )
+
+
 def is_url(source: str) -> bool:
     if source.startswith("-"):
         return False
@@ -98,11 +110,15 @@ def _pick_subtitle(out_dir: Path) -> Path | None:
 
 
 def _pick_video(out_dir: Path) -> Path | None:
+    # Der exakte Ausgabename ist der abgeschlossene Merge. video.f137.mp4 usw.
+    # sind getrennte yt-dlp-Streams und duerfen nie als fertiges Video gelten.
     for ext in (".mp4", ".mkv", ".webm", ".mov"):
-        for candidate in out_dir.glob(f"video*{ext}"):
+        candidate = out_dir / f"video{ext}"
+        if candidate.is_file():
             return candidate
-    for candidate in out_dir.glob("video.*"):
-        if candidate.suffix.lower() in VIDEO_EXTS:
+    for candidate in sorted(out_dir.glob("video.*")):
+        is_fragment = re.match(r"^video\.f\d+\.", candidate.name) is not None
+        if candidate.is_file() and not is_fragment and candidate.suffix.lower() in VIDEO_EXTS:
             return candidate
     return None
 
@@ -141,12 +157,21 @@ def download_url(url: str, out_dir: Path) -> dict:
 
     # yt-dlp may exit non-zero if a subtitle variant fails (e.g. 429) even when
     # the video itself downloaded fine. Treat "video file present" as success.
-    result = subprocess.run(cmd, stdout=sys.stderr, stderr=sys.stderr)
+    result = subprocess.run(cmd, capture_output=True, text=True)
     video = _pick_video(run_dir)
     if video is None:
+        _emit_untrusted_diagnostic(
+            "yt-dlp",
+            getattr(result, "stderr", "") or getattr(result, "stdout", ""),
+        )
         shutil.rmtree(run_dir, ignore_errors=True)
         raise SystemExit(
             f"yt-dlp did not produce a video file in {run_dir} (exit {result.returncode})"
+        )
+    if result.returncode != 0:
+        _emit_untrusted_diagnostic(
+            "yt-dlp",
+            getattr(result, "stderr", "") or getattr(result, "stdout", ""),
         )
 
     subtitle = _pick_subtitle(run_dir)
@@ -161,7 +186,7 @@ def download_url(url: str, out_dir: Path) -> dict:
                 "url": raw.get("webpage_url") or url,
             }
         except Exception as exc:
-            print(f"[watch] info.json parse failed: {exc}", file=sys.stderr)
+            _emit_untrusted_diagnostic("info.json", exc)
             info = {"url": url}
 
     return {

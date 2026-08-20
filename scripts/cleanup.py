@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent.resolve()
+sys.path.insert(0, str(SCRIPT_DIR))
 
 from workdir import cleanup_work_dir
 

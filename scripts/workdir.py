@@ -1,10 +1,11 @@
-#!/usr/bin/env python3
 """Sicher erzeugte und wieder loeschbare Arbeitsverzeichnisse fuer /watch."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import shutil
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 
@@ -14,12 +15,17 @@ MARKER_SCHEMA = 1
 
 def create_work_dir(base_dir: str | Path | None = None) -> Path:
     """Erzeuge immer ein exklusives Kindverzeichnis, auch bei --out-dir."""
-    if base_dir is None:
-        work = Path(tempfile.mkdtemp(prefix="watch-"))
-    else:
-        base = Path(base_dir).expanduser().resolve()
-        base.mkdir(parents=True, exist_ok=True)
-        work = Path(tempfile.mkdtemp(prefix="watch-", dir=base))
+    try:
+        if base_dir is None or not str(base_dir).strip():
+            work = Path(tempfile.mkdtemp(prefix="watch-"))
+        else:
+            base = Path(base_dir).expanduser().resolve()
+            base.mkdir(parents=True, exist_ok=True)
+            if not base.is_dir():
+                raise NotADirectoryError(f"not a directory: {base}")
+            work = Path(tempfile.mkdtemp(prefix="watch-", dir=base))
+    except OSError as exc:
+        raise SystemExit(f"cannot create watch working directory: {exc}") from exc
 
     marker = {
         "schema": MARKER_SCHEMA,
@@ -31,6 +37,17 @@ def create_work_dir(base_dir: str | Path | None = None) -> Path:
         encoding="utf-8",
     )
     return work
+
+
+@contextmanager
+def work_dir(base_dir: str | Path | None = None) -> Iterator[Path]:
+    """Behalte erfolgreiche Laeufe, raeume abgebrochene Laeufe sicher auf."""
+    work = create_work_dir(base_dir)
+    try:
+        yield work
+    except BaseException:
+        cleanup_work_dir(work)
+        raise
 
 
 def is_owned_work_dir(path: str | Path) -> bool:

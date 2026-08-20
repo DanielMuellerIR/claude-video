@@ -37,6 +37,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -52,6 +53,18 @@ OPENAI_MODEL = "whisper-1"
 _LOCAL_HF_BASE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 _LOCAL_DEFAULT_MODEL = "large-v3-turbo"
 _LOCAL_DEFAULT_MODELS_DIR = Path.home() / ".cache" / "yt-transcribe" / "models"
+_WHISPER_BACKENDS = ("groq", "openai", "local")
+_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+@dataclass(frozen=True)
+class BackendResolution:
+    backend: str | None
+    credential: str | None
+    requested_backend: str | None
+    reason: str | None
+    available_backends: tuple[str, ...]
+    source: str
 
 
 def _dotenv_value(path: Path, name: str) -> str | None:
@@ -100,25 +113,69 @@ def available_whisper_backends(
 def resolve_whisper_backend(
     preferred: str | None = None,
     dotenv_paths: list[Path] | None = None,
-) -> tuple[str, str] | tuple[None, None]:
-    """Waehle mit fester Praezedenz CLI > Env-Vorgabe > Auto-Erkennung."""
+) -> BackendResolution:
+    """Waehle mit CLI > Env > Auto und erhalte einen konkreten Ablehnungsgrund."""
     available = available_whisper_backends(dotenv_paths)
-    env_preferred = os.environ.get("WATCH_WHISPER_BACKEND", "").strip().lower()
-    requested = preferred or env_preferred or None
-    if requested is not None:
-        value = available.get(requested)
-        return (requested, value) if value else (None, None)
+    explicit = preferred is not None
+    env_preferred = os.environ.get("WATCH_WHISPER_BACKEND", "").strip()
+    raw_requested = preferred if explicit else env_preferred or None
+    requested = raw_requested.strip().lower() if raw_requested is not None else None
+    source = "cli" if explicit else "environment" if requested else "auto"
+    reason: str | None = None
 
-    for backend in ("groq", "openai", "local"):
+    if requested:
+        if requested not in _WHISPER_BACKENDS:
+            reason = (
+                f"unsupported Whisper backend {raw_requested!r}; expected groq, openai, or local"
+            )
+        elif requested in available:
+            return BackendResolution(
+                requested,
+                available[requested],
+                requested,
+                None,
+                tuple(available),
+                source,
+            )
+        elif requested == "local":
+            reason = "requested Whisper backend 'local' is unavailable: whisper-cli is not on PATH"
+        else:
+            reason = (
+                f"requested Whisper backend {requested!r} is unavailable: "
+                f"{requested.upper()}_API_KEY is missing"
+            )
+
+        # Eine ausdrueckliche CLI-Wahl ist bindend. Eine fehlerhafte Env-Vorgabe
+        # wird dagegen diagnostiziert und faellt auf die automatische Reihenfolge.
+        if explicit:
+            return BackendResolution(
+                None,
+                None,
+                requested,
+                reason,
+                tuple(available),
+                source,
+            )
+
+    for backend in _WHISPER_BACKENDS:
         value = available.get(backend)
         if value:
-            return backend, value
-    return None, None
-
-
-def load_api_key(preferred: str | None = None) -> tuple[str, str] | tuple[None, None]:
-    """Kompatibilitaets-Wrapper fuer den gemeinsamen Backend-Resolver."""
-    return resolve_whisper_backend(preferred)
+            return BackendResolution(
+                backend,
+                value,
+                requested,
+                reason,
+                tuple(available),
+                "fallback" if requested else "auto",
+            )
+    return BackendResolution(
+        None,
+        None,
+        requested,
+        reason or "no Whisper backend is available",
+        tuple(available),
+        source,
+    )
 
 
 def _audio_range_args(
@@ -218,6 +275,10 @@ def ensure_model_local(model: str | None = None) -> Path:
     """
     if not model:
         model = os.environ.get("WATCH_WHISPER_MODEL", _LOCAL_DEFAULT_MODEL).strip()
+    if not model or _MODEL_NAME_RE.fullmatch(model) is None:
+        raise SystemExit(
+            "invalid WATCH_WHISPER_MODEL: use only letters, numbers, dot, underscore, or hyphen"
+        )
     models_dir_env = os.environ.get("WATCH_WHISPER_MODELS_DIR", "")
     models_dir = Path(models_dir_env).expanduser() if models_dir_env else _LOCAL_DEFAULT_MODELS_DIR
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -340,16 +401,7 @@ def transcribe_local(
     if not segments:
         raise SystemExit("whisper.cpp returned no transcript segments")
 
-    offset = start_seconds or 0.0
-    if offset:
-        segments = [
-            {
-                **segment,
-                "start": round(segment["start"] + offset, 2),
-                "end": round(segment["end"] + offset, 2),
-            }
-            for segment in segments
-        ]
+    segments = _shift_segments(segments, start_seconds or 0.0)
 
     # Clean up temporary files.
     for tmp in (wav_path, json_file):
@@ -517,6 +569,8 @@ def _segments_from_response(data: dict) -> list[dict]:
 # Maximale Upload-Größe für Cloud-APIs in Bytes (~24 MB Sicherheitspuffer unter dem 25 MB Limit).
 _CLOUD_MAX_BYTES = 24 * 1024 * 1024
 _CHUNK_OVERLAP_SECONDS = 5.0
+_OVERLAP_WINDOW_TOLERANCE_SECONDS = 1.0
+_MIN_SUBSTRING_WORDS = 5
 
 
 def _get_audio_duration_seconds(audio_path: Path) -> float:
@@ -571,7 +625,39 @@ def _split_audio_chunk(audio_path: Path, chunk_dir: Path, start_sec: float, dura
 
 def _normalized_segment_text(text: str) -> str:
     """Normalisiere Text fuer die Deduplizierung im Chunk-Ueberlapp."""
-    return " ".join(re.findall(r"\w+", text.casefold(), flags=re.UNICODE))
+    return " ".join(re.findall(r"\w+", text.casefold()))
+
+
+def _shift_segments(segments: list[dict], offset: float) -> list[dict]:
+    """Kopiere Segmente und verschiebe ihre Zeitstempel genau einmal."""
+    if not offset:
+        return [dict(segment) for segment in segments]
+    return [
+        {
+            **segment,
+            "start": round(segment["start"] + offset, 2),
+            "end": round(segment["end"] + offset, 2),
+        }
+        for segment in segments
+    ]
+
+
+def _is_duplicate_segment(candidate: dict, segment: dict) -> bool:
+    """Erkenne nur textgleiche Segmente mit echter zeitlicher Ueberlappung."""
+    candidate_text = _normalized_segment_text(candidate["text"])
+    segment_text = _normalized_segment_text(segment["text"])
+    if not candidate_text or not segment_text:
+        return False
+    candidate_words = candidate_text.split()
+    segment_words = segment_text.split()
+    same_text = candidate_text == segment_text
+    if not same_text and min(len(candidate_words), len(segment_words)) >= _MIN_SUBSTRING_WORDS:
+        same_text = candidate_text in segment_text or segment_text in candidate_text
+    intervals_overlap = (
+        segment["start"] <= candidate["end"]
+        and segment["end"] >= candidate["start"]
+    )
+    return same_text and intervals_overlap
 
 
 def _merge_overlap_segments(
@@ -581,31 +667,21 @@ def _merge_overlap_segments(
     overlap_end: float,
 ) -> list[dict]:
     """Fuege Chunks zusammen und entferne nur zeitlich passende Text-Dubletten."""
-    merged = list(existing)
+    merged = [dict(segment) for segment in existing]
     for segment in incoming:
         normalized = _normalized_segment_text(segment["text"])
         duplicate_index: int | None = None
-        if normalized and segment["start"] <= overlap_end + 1.0:
+        if normalized and segment["start"] <= overlap_end + _OVERLAP_WINDOW_TOLERANCE_SECONDS:
             for index in range(len(merged) - 1, -1, -1):
                 candidate = merged[index]
-                if candidate["end"] < overlap_start - 1.0:
+                if candidate["end"] < overlap_start - _OVERLAP_WINDOW_TOLERANCE_SECONDS:
                     break
-                candidate_text = _normalized_segment_text(candidate["text"])
-                same_text = (
-                    normalized == candidate_text
-                    or (len(normalized) >= 12 and normalized in candidate_text)
-                    or (len(candidate_text) >= 12 and candidate_text in normalized)
-                )
-                time_close = (
-                    segment["start"] <= candidate["end"] + 2.0
-                    and segment["end"] >= candidate["start"] - 2.0
-                )
-                if same_text and time_close:
+                if _is_duplicate_segment(candidate, segment):
                     duplicate_index = index
                     break
 
         if duplicate_index is None:
-            merged.append(segment)
+            merged.append(dict(segment))
             continue
 
         candidate = merged[duplicate_index]
@@ -681,9 +757,8 @@ def _transcribe_cloud_chunked(
     try:
         chunk_index = 0
         chunk_start = 0.0
-        previous_end = 0.0
 
-        while chunk_start < total_duration:
+        while True:
             chunk_duration = min(max_chunk_sec, total_duration - chunk_start)
             chunk_path = _split_audio_chunk(audio_path, tmp_dir, chunk_start, chunk_duration, chunk_index)
 
@@ -713,14 +788,13 @@ def _transcribe_cloud_chunked(
                     all_segments,
                     absolute_segments,
                     overlap_start=chunk_start,
-                    overlap_end=min(previous_end, chunk_start + overlap),
+                    overlap_end=chunk_start + overlap,
                 )
 
             chunk_end = chunk_start + chunk_duration
             if chunk_end >= total_duration:
                 break
-            previous_end = chunk_end
-            chunk_start += max(chunk_duration - overlap, 0.001)
+            chunk_start += chunk_duration - overlap
             chunk_index += 1
 
     finally:
@@ -746,9 +820,22 @@ def transcribe_video(
     Returns (segments, backend_used). Raises SystemExit on any failure.
     """
     if backend is None or api_key is None:
-        detected_backend, detected_key = load_api_key(backend)
-        backend = backend or detected_backend
-        api_key = api_key or detected_key
+        resolution = resolve_whisper_backend(backend)
+        if resolution.reason:
+            if resolution.backend is None:
+                raise SystemExit(resolution.reason)
+            print(
+                f"[watch] warning: {resolution.reason}; using {resolution.backend!r} instead",
+                file=sys.stderr,
+            )
+        backend = resolution.backend
+        api_key = resolution.credential
+    elif backend is not None:
+        backend = backend.strip().lower()
+        if backend not in _WHISPER_BACKENDS:
+            raise SystemExit(
+                f"unsupported Whisper backend {backend!r}; expected groq, openai, or local"
+            )
 
     # Local whisper.cpp path — no API key required.
     if backend == "local":
@@ -786,16 +873,7 @@ def transcribe_video(
     if not segments:
         raise SystemExit("Whisper returned no transcript segments")
 
-    offset = start_seconds or 0.0
-    if offset:
-        segments = [
-            {
-                **segment,
-                "start": round(segment["start"] + offset, 2),
-                "end": round(segment["end"] + offset, 2),
-            }
-            for segment in segments
-        ]
+    segments = _shift_segments(segments, start_seconds or 0.0)
 
     print(f"[watch] transcribed {len(segments)} segments via {backend}", file=sys.stderr)
     return segments, backend
