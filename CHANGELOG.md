@@ -2,6 +2,11 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.1.8] — 2026-09-07
+
+### Fixed
+- Concurrent local Whisper model downloads use separate temporary files and publish complete models atomically; failed downloads clean up only their own file.
+
 ## [0.1.7] — 2026-08-20
 
 ### Fixed

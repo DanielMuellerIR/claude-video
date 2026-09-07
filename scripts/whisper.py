@@ -33,6 +33,7 @@ import shutil
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -296,15 +297,22 @@ def ensure_model_local(model: str | None = None) -> Path:
             pct = min(100, blocks * block_size * 100 // total)
             print(f"\r  {pct:3d}%", end="", file=sys.stderr, flush=True)
 
-    tmp = path.with_suffix(".part")
+    # Jeder Download besitzt seine eigene Datei. Das vollständige Modell wird
+    # erst nach geschlossenem Download atomar im gemeinsamen Cache veröffentlicht.
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}-", suffix=".part",
+                                             dir=models_dir)
+    os.close(descriptor)
+    tmp = Path(temporary)
     try:
         urllib.request.urlretrieve(url, tmp, _progress)
         print("", file=sys.stderr)
-        tmp.rename(path)
+        if tmp.stat().st_size == 0:
+            raise OSError("downloaded model is empty")
+        tmp.replace(path)
     except Exception as exc:
-        if tmp.exists():
-            tmp.unlink()
         raise SystemExit(f"[watch] model download failed ({url}): {exc}") from exc
+    finally:
+        tmp.unlink(missing_ok=True)
     return path
 
 
