@@ -2,6 +2,13 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.1.9] — 2026-09-08
+
+### Fixed
+- FPS overrides use the user frame cap for uniform sampling independently of the scene budget.
+- Adjacent repeated transcript segments remain separate unless their time intervals overlap.
+- Classifier errors and partial runs are reported; unclassified frames are retained.
+
 ## [0.1.8] — 2026-09-07
 
 ### Fixed

@@ -172,6 +172,7 @@ def _run(args: argparse.Namespace, max_frames: int, scene_threshold: float, work
         fps=fps,
         resolution=args.resolution,
         max_frames=target_frames,
+        fallback_max_frames=max_frames,
         start_seconds=start_sec,
         end_seconds=end_sec,
         scene_threshold=scene_threshold,
@@ -260,7 +261,10 @@ def _run(args: argparse.Namespace, max_frames: int, scene_threshold: float, work
     method = extraction_stats.get("method", "scene")
     raw = extraction_stats.get("raw_count", len(frames))
     deleted = extraction_stats.get("deleted_count", 0)
-    if extraction_stats.get("classified"):
+    if extraction_stats.get("classification_error"):
+        classified_note = (f", classifier {extraction_stats['classification_status']}: "
+                           f"{extraction_stats['classification_error']}, {deleted} deleted")
+    elif extraction_stats.get("classified"):
         classified_note = f", {deleted} deleted by classifier"
     elif args.no_classify:
         classified_note = ", classifier disabled"

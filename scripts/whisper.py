@@ -662,8 +662,8 @@ def _is_duplicate_segment(candidate: dict, segment: dict) -> bool:
     if not same_text and min(len(candidate_words), len(segment_words)) >= _MIN_SUBSTRING_WORDS:
         same_text = candidate_text in segment_text or segment_text in candidate_text
     intervals_overlap = (
-        segment["start"] <= candidate["end"]
-        and segment["end"] >= candidate["start"]
+        segment["start"] < candidate["end"]
+        and segment["end"] > candidate["start"]
     )
     return same_text and intervals_overlap
 

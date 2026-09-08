@@ -12,8 +12,8 @@ Extraction strategy:
   3. CLASSIFICATION (optional, --no-classify to skip): each frame is sent to a
      local vision-LLM helper, configured through the LLM_RUN and LLM_HOST
      environment variables.  Frames classified VERWERFEN are deleted from disk.
-     Any connectivity error is caught and classification is silently skipped
-     (all frames kept).
+     Any connectivity error is caught and classification stops with an explicit error status
+     (remaining frames kept).
 """
 from __future__ import annotations
 
@@ -351,7 +351,7 @@ def extract(
 
 # ── Vision-Klassifikation ─────────────────────────────────────────────────────
 
-def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int, bool]:
+def classify_frames(frames: list[dict], *, stats: dict | None = None) -> tuple[list[dict], int, int, bool]:
     """Klassifiziert Frames mit einem lokalen Vision-LLM.
 
     Frames, die als reine Sprecherkopf-/Logo-/Deko-Aufnahme klassifiziert
@@ -361,6 +361,9 @@ def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int, bool]:
     Falls llm_run.py nicht erreichbar ist oder ein Fehler auftritt, werden
     alle Frames behalten und eine Warnung ausgegeben.
     """
+    stats = stats if stats is not None else {}
+    stats["classification_status"] = "not_configured"
+    completed = 0
     # Beide Env-Vars müssen gesetzt sein, sonst ist keine Verbindung möglich.
     if not _LLM_RUN or not _LLM_HOST:
         print(
@@ -381,10 +384,9 @@ def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int, bool]:
     # braucht sie, um die restlichen Frames ohne fragile index()-Suche zu behalten.
     for frame_pos, frame in enumerate(frames):
         frame_path = frame["path"]
-        if not Path(frame_path).exists():
-            kept.append(frame)
-            continue
         try:
+            if not Path(frame_path).is_file():
+                raise FileNotFoundError("Frame fehlt")
             result = subprocess.run(
                 [
                     sys.executable,
@@ -399,12 +401,15 @@ def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int, bool]:
                 text=True,
                 timeout=60,  # 60 s pro Frame sollte großzügig sein
             )
+            if result.returncode != 0:
+                raise RuntimeError(f"Helfer-Exit {result.returncode}")
             answer = result.stdout.strip().upper()
             # Strenger Match: nur löschen, wenn die Antwort exakt "VERWERFEN" ist
             # (oder als erstes Token steht). "nicht VERWERFEN" o. ä. würde sonst
             # fälschlicherweise zum Löschen führen.
-            first_token = answer.split()[0] if answer.split() else ""
-            if first_token == "VERWERFEN":
+            if answer not in ("NÜTZLICH", "VERWERFEN"):
+                raise ValueError("Ungueltige Klassifikationsantwort")
+            if answer == "VERWERFEN":
                 os.remove(frame_path)
                 deleted += 1
                 print(
@@ -419,23 +424,16 @@ def classify_frames(frames: list[dict]) -> tuple[list[dict], int, int, bool]:
                     f"({frame_path})",
                     file=sys.stderr,
                 )
-        except subprocess.TimeoutExpired:
-            print(
-                f"[frames] Klassifikation-Timeout für {frame_path} — Frame behalten",
-                file=sys.stderr,
-            )
-            kept.append(frame)
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"[frames] Klassifikations-Fehler ({exc}) — alle verbleibenden Frames behalten",
-                file=sys.stderr,
-            )
-            # Restliche Frames unklassifiziert behalten
-            kept.append(frame)
-            # Verbleibende Frames direkt durchreichen
-            kept.extend(frames[frame_pos + 1:])
-            break
+            completed += 1
+        except Exception as exc:  # Fehler behalten den unklassifizierten Rest.
+            error = "timeout" if isinstance(exc, subprocess.TimeoutExpired) else str(exc)
+            stats["classification_status"] = "partial" if completed else "failed"
+            stats["classification_error"] = error
+            print(f"[frames] Klassifikation abgebrochen ({error}) — Rest behalten", file=sys.stderr)
+            kept.extend(frames[frame_pos:])
+            return kept, len(kept), deleted, False
 
+    stats["classification_status"] = "complete"
     return kept, len(kept), deleted, True
 
 
@@ -451,6 +449,7 @@ def extract_smart(
     end_seconds: float | None = None,
     scene_threshold: float = 0.3,
     no_classify: bool = False,
+    fallback_max_frames: int | None = None,
 ) -> tuple[list[dict], dict]:
     """Hauptfunktion: Szenen-Erkennung mit Fallback, dann optionale Klassifikation.
 
@@ -487,7 +486,7 @@ def extract_smart(
             video_path, out_dir,
             fps=fps,
             resolution=resolution,
-            max_frames=max_frames,
+            max_frames=fallback_max_frames if fallback_max_frames is not None else max_frames,
             start_seconds=start_seconds,
             end_seconds=end_seconds,
         )
@@ -502,7 +501,7 @@ def extract_smart(
         return frames, stats
 
     # Vision-Klassifikation
-    kept, n_kept, n_deleted, classified = classify_frames(frames)
+    kept, n_kept, n_deleted, classified = classify_frames(frames, stats=stats)
     stats["kept_count"] = n_kept
     stats["deleted_count"] = n_deleted
     stats["classified"] = classified
@@ -580,6 +579,7 @@ if __name__ == "__main__":
         end_seconds=end_sec,
         scene_threshold=scene_threshold,
         no_classify=no_classify,
+        fallback_max_frames=max_frames,
     )
     print(json.dumps(
         {
