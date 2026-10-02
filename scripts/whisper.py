@@ -371,52 +371,48 @@ def transcribe_local(
 
     model_path = ensure_model_local()
 
-    # Use a WAV path next to the requested audio_out (different extension).
-    wav_path = audio_out.with_suffix(".wav")
-    print(f"[watch] extracting audio for local whisper.cpp…", file=sys.stderr)
-    extract_audio_wav(video_path, wav_path, start_seconds, end_seconds)
-    size_kb = wav_path.stat().st_size / 1024
-    print(f"[watch] audio: {size_kb:.0f} kB — running local whisper.cpp ({binary})…",
-          file=sys.stderr)
+    # Eigene Zwischenablage verhindert alte Transkripte und schuetzt Dateien
+    # mit demselben Stamm wie audio_out, auch bei fehlgeschlagenen Laeufen.
+    audio_out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="whisper-", dir=audio_out.parent) as temporary:
+        wav_path = Path(temporary) / "audio.wav"
+        print(f"[watch] extracting audio for local whisper.cpp…", file=sys.stderr)
+        extract_audio_wav(video_path, wav_path, start_seconds, end_seconds)
+        size_kb = wav_path.stat().st_size / 1024
+        print(f"[watch] audio: {size_kb:.0f} kB — running local whisper.cpp ({binary})…",
+              file=sys.stderr)
 
-    # JSON output file: whisper-cli appends .json to the -of base name.
-    json_base = audio_out.with_suffix("")  # strip any extension; -of is a path base
-    json_file = Path(str(json_base) + ".json")
+        # JSON output file: whisper-cli appends .json to the -of base name.
+        json_base = Path(temporary) / "transcript"
+        json_file = Path(str(json_base) + ".json")
 
-    threads = str(max(4, (os.cpu_count() or 4)))
-    cmd = [
-        binary,
-        "-m", str(model_path),
-        "-f", str(wav_path),
-        "-of", str(json_base),
-        "-oj",          # write JSON output
-        "-t", threads,
-        "-l", "auto",   # auto-detect language
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise SystemExit(f"whisper.cpp failed (exit {result.returncode}):\n{result.stderr.strip()}")
+        threads = str(max(4, (os.cpu_count() or 4)))
+        cmd = [
+            binary,
+            "-m", str(model_path),
+            "-f", str(wav_path),
+            "-of", str(json_base),
+            "-oj",          # write JSON output
+            "-t", threads,
+            "-l", "auto",   # auto-detect language
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise SystemExit(f"whisper.cpp failed (exit {result.returncode}):\n{result.stderr.strip()}")
 
-    if not json_file.exists():
-        raise SystemExit(f"whisper.cpp produced no JSON output (expected: {json_file})")
+        if not json_file.exists():
+            raise SystemExit(f"whisper.cpp produced no JSON output (expected: {json_file})")
 
-    try:
-        data = json.loads(json_file.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        raise SystemExit(f"whisper.cpp JSON unreadable: {exc}") from exc
-
-    segments = _segments_from_whisper_cpp_json(data)
-    if not segments:
-        raise SystemExit("whisper.cpp returned no transcript segments")
-
-    segments = _shift_segments(segments, start_seconds or 0.0)
-
-    # Clean up temporary files.
-    for tmp in (wav_path, json_file):
         try:
-            tmp.unlink()
-        except OSError:
-            pass
+            data = json.loads(json_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise SystemExit(f"whisper.cpp JSON unreadable: {exc}") from exc
+
+        segments = _segments_from_whisper_cpp_json(data)
+        if not segments:
+            raise SystemExit("whisper.cpp returned no transcript segments")
+
+        segments = _shift_segments(segments, start_seconds or 0.0)
 
     print(f"[watch] transcribed {len(segments)} segments via local whisper.cpp", file=sys.stderr)
     return segments, "local"

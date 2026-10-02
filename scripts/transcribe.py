@@ -6,6 +6,7 @@ scrolls). We dedupe consecutive identical cues and merge their time ranges.
 """
 from __future__ import annotations
 
+import html
 import json
 import re
 import sys
@@ -49,7 +50,7 @@ def parse_vtt(path: str) -> list[dict]:
 
         cue_lines: list[str] = []
         while i < len(lines) and lines[i].strip():
-            cleaned = TAG_RE.sub("", lines[i]).strip()
+            cleaned = html.unescape(TAG_RE.sub("", lines[i])).strip()
             if cleaned:
                 cue_lines.append(cleaned)
             i += 1
@@ -66,14 +67,15 @@ def _dedupe(segments: list[dict]) -> list[dict]:
     """Collapse rolling duplicates common in YouTube auto-subs."""
     out: list[dict] = []
     for seg in segments:
-        if out and seg["text"] == out[-1]["text"]:
-            out[-1]["end"] = seg["end"]
+        overlaps = bool(out) and max(seg["start"], out[-1]["start"]) < min(seg["end"], out[-1]["end"])
+        if overlaps and seg["text"] == out[-1]["text"]:
+            out[-1]["end"] = max(out[-1]["end"], seg["end"])
             continue
-        if out and seg["text"].startswith(out[-1]["text"] + " "):
+        if overlaps and seg["text"].startswith(out[-1]["text"] + " "):
             out[-1]["text"] = seg["text"]
-            out[-1]["end"] = seg["end"]
+            out[-1]["end"] = max(out[-1]["end"], seg["end"])
             continue
-        out.append(seg)
+        out.append(dict(seg))
     return out
 
 

@@ -59,11 +59,12 @@ def is_owned_work_dir(path: str | Path) -> bool:
     marker_path = work / MARKER_NAME
     try:
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return False
 
     return (
-        marker.get("schema") == MARKER_SCHEMA
+        isinstance(marker, dict)
+        and marker.get("schema") == MARKER_SCHEMA
         and marker.get("owner") == "watch"
         and marker.get("work_dir") == str(work)
     )

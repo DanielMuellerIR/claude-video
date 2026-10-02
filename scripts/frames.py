@@ -18,6 +18,7 @@ Extraction strategy:
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -46,21 +47,48 @@ def parse_time(value: str | float | int | None) -> float | None:
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        if math.isfinite(value):
+            return float(value)
+        raise SystemExit("Time values must be finite")
     s = str(value).strip()
     if not s:
         return None
     parts = s.split(":")
     try:
         if len(parts) == 1:
-            return float(parts[0])
+            parsed = float(parts[0])
         if len(parts) == 2:
-            return int(parts[0]) * 60 + float(parts[1])
+            parsed = int(parts[0]) * 60 + float(parts[1])
         if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-    except ValueError:
+            parsed = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        if 1 <= len(parts) <= 3 and math.isfinite(parsed):
+            return parsed
+    except (ValueError, OverflowError):
         pass
     raise SystemExit(f"Cannot parse time value: {value!r} (expected SS, MM:SS, or HH:MM:SS)")
+
+
+def validate_range(
+    start_seconds: float | None,
+    end_seconds: float | None,
+    duration_seconds: float,
+) -> tuple[float | None, float | None]:
+    """Pruefe beide Einstiege gleich und begrenze bekannte Videobereiche."""
+    if start_seconds is not None and start_seconds < 0:
+        raise SystemExit("--start must be non-negative")
+    if end_seconds is not None and end_seconds <= 0:
+        raise SystemExit("--end must be positive")
+    if end_seconds is not None and start_seconds is not None and end_seconds <= start_seconds:
+        raise SystemExit("--end must be greater than --start")
+    if duration_seconds > 0 and start_seconds is not None and start_seconds >= duration_seconds:
+        raise SystemExit(f"--start {start_seconds:.1f}s is past end of video ({duration_seconds:.1f}s)")
+    if end_seconds is not None and duration_seconds > 0 and end_seconds > duration_seconds:
+        print(
+            f"[watch] --end {end_seconds:.1f}s is past end of video — clamping to {duration_seconds:.1f}s",
+            file=sys.stderr,
+        )
+        end_seconds = duration_seconds
+    return start_seconds, end_seconds
 
 
 def format_time(seconds: float) -> str:
@@ -159,8 +187,8 @@ def sampling_plan(
     planner = auto_fps_focus if focused else auto_fps
     fps, target_frames = planner(duration_seconds, max_frames=max_frames)
     if fps_override is not None:
-        if fps_override <= 0:
-            raise ValueError("--fps must be greater than zero")
+        if not math.isfinite(fps_override) or fps_override <= 0:
+            raise ValueError("--fps must be finite and greater than zero")
         # Szenen werden nach ihrem eigenen Dauerbudget ausgewaehlt. --fps steuert
         # nur den gleichmaessigen Fallback, wie es die CLI-Hilfe verspricht.
         fps = min(fps_override, MAX_FPS)
@@ -323,10 +351,20 @@ def extract(
     if end_seconds is not None:
         cmd += ["-to", f"{end_seconds:.3f}"]
 
+    # Aufrunden behaelt den Bereichsanfang statt Bilder um ein halbes
+    # Sampling-Intervall vorzuziehen und sehr kurze Clips zu verlieren.
+    # start_time=0 bindet auch nicht framegenaue Seeks an den Bereichsstart.
+    filters = f"fps={fps}:round=up:start_time=0"
+    if end_seconds is not None:
+        # Ausgabe--t und trim runden auf Sampling-Ticks. Stattdessen genau
+        # die Samples vor dem exklusiven Ende zulassen, ohne Rundungsartefakte.
+        duration = end_seconds - (start_seconds or 0.0)
+        max_frames = min(max_frames, max(1, math.ceil(duration * fps - 1e-9)))
+    # 'min(resolution,iw)' verhindert Hochskalieren ueber die Quellbreite.
+    filters += f",scale='min({resolution},iw)':-2"
     cmd += [
         "-i", str(Path(video_path).resolve()),
-        # 'min(resolution,iw)' verhindert Hochskalieren über die Quellbreite
-        "-vf", f"fps={fps},scale='min({resolution},iw)':-2",
+        "-vf", filters,
         "-frames:v", str(max_frames),
         "-q:v", "4",
         output_pattern,
@@ -553,6 +591,7 @@ if __name__ == "__main__":
     start_sec = parse_time(start_arg)
     end_sec = parse_time(end_arg)
     full_duration = meta["duration_seconds"]
+    start_sec, end_sec = validate_range(start_sec, end_sec, full_duration)
 
     effective_start = start_sec if start_sec is not None else 0.0
     effective_end = end_sec if end_sec is not None else full_duration

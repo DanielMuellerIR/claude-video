@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -16,7 +17,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from download import download, is_url, normalize_yt_url  # noqa: E402
-from frames import extract_smart, format_time, get_metadata, parse_time, sampling_plan  # noqa: E402
+from frames import extract_smart, format_time, get_metadata, parse_time, sampling_plan, validate_range  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 from whisper import resolve_whisper_backend, transcribe_video  # noqa: E402
 from workdir import work_dir  # noqa: E402
@@ -33,8 +34,8 @@ def _print_json_block(value: object) -> None:
 
 def _positive_float(value: str) -> float:
     parsed = float(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be finite and greater than zero")
     return parsed
 
 
@@ -121,24 +122,7 @@ def _run(args: argparse.Namespace, max_frames: int, scene_threshold: float, work
     start_sec = parse_time(args.start)
     end_sec = parse_time(args.end)
 
-    if start_sec is not None and start_sec < 0:
-        raise SystemExit("--start must be non-negative")
-    # Negatives oder Null-Ende ist immer sinnlos — früh und laut abbrechen,
-    # sonst würde filter_range später still ein leeres/volles Transkript liefern.
-    if end_sec is not None and end_sec <= 0:
-        raise SystemExit("--end must be positive")
-    if end_sec is not None and start_sec is not None and end_sec <= start_sec:
-        raise SystemExit("--end must be greater than --start")
-    if full_duration > 0 and start_sec is not None and start_sec >= full_duration:
-        raise SystemExit(f"--start {start_sec:.1f}s is past end of video ({full_duration:.1f}s)")
-    # --end hinter dem Videoende auf die reale Länge kürzen: sonst wird das
-    # Frame-Budget auf eine viel zu lange Range berechnet (zu wenige Frames).
-    if end_sec is not None and full_duration > 0 and end_sec > full_duration:
-        print(
-            f"[watch] --end {end_sec:.1f}s is past end of video — clamping to {full_duration:.1f}s",
-            file=sys.stderr,
-        )
-        end_sec = full_duration
+    start_sec, end_sec = validate_range(start_sec, end_sec, full_duration)
 
     effective_start = start_sec if start_sec is not None else 0.0
     effective_end = end_sec if end_sec is not None else full_duration

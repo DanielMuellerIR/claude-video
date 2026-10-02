@@ -29,6 +29,9 @@ zip -d "$OUT" \
   "watch/hooks/*" \
   "watch/commands/*" \
   "watch/.claude-plugin/*" \
+  "watch/.codex-plugin/*" \
+  "watch/AGENTS.md" \
+  "watch/CLAUDE.md" \
   > /dev/null 2>&1 || true
 
 COUNT=$(unzip -l "$OUT" | tail -1 | awk '{print $2}')

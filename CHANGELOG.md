@@ -2,6 +2,19 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.1.10] — 2026-10-02
+
+### Fixed
+- Uniform frame sampling keeps the first frame, including subsecond clips and fractional seek positions, and aligns sparse samples with their reported timestamps.
+- The standalone frame extractor validates focused ranges and clamps their end to the video duration before planning samples; non-finite time and FPS inputs are rejected.
+- Caption deduplication preserves separate utterances and full overlapping intervals; WebVTT character references are decoded.
+- Local Whisper uses isolated temporary output, preserving existing sibling WAV/JSON files and rejecting stale transcripts.
+- The session hook supports installation paths containing spaces, and cleanup safely rejects malformed ownership markers.
+- The upload bundle excludes contributor instructions and Codex plugin metadata.
+
+### Tests
+- Added headless regressions and real ffmpeg fixtures for frame content, short clips, fractional seeks, and standalone range handling.
+
 ## [0.1.9] — 2026-09-08
 
 ### Fixed
