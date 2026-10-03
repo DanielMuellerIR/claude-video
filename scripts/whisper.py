@@ -23,6 +23,7 @@ Local backend configuration (env vars):
 """
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import math
@@ -325,8 +326,18 @@ def _find_whisper_cli() -> str | None:
       whisper      (some Linux distro packages)
     """
     for name in ("whisper-cli", "main", "whisper"):
-        if shutil.which(name):
-            return name
+        binary = shutil.which(name)
+        if binary is None:
+            continue
+        try:
+            probe = subprocess.run([binary, "--help"], capture_output=True,
+                                   text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        help_text = probe.stdout + probe.stderr
+        if all(re.search(r"(?<!\S)" + re.escape(option) + r"(?=\s|,|$)", help_text)
+               for option in ("-m", "-of", "-oj", "-t", "-l")):
+            return binary
     return None
 
 
@@ -504,7 +515,7 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
                 )
                 time.sleep(delay)
             continue
-        except (urllib.error.URLError, TimeoutError, ConnectionResetError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, ConnectionResetError, OSError, http.client.IncompleteRead) as exc:
             last_exc, last_detail = exc, ""
             if attempt < MAX_ATTEMPTS - 1:
                 delay = RETRY_BASE_DELAY * (attempt + 1)

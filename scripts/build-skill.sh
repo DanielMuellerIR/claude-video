@@ -25,14 +25,27 @@ git archive --format=zip --prefix=watch/ --output="$OUT" HEAD
 # they are NOT in .gitattributes export-ignore), but the .skill bundle should
 # strip them to keep a single canonical SKILL.md and stay well under the
 # 200-file cap.
-zip -d "$OUT" \
-  "watch/hooks/*" \
-  "watch/commands/*" \
-  "watch/.claude-plugin/*" \
-  "watch/.codex-plugin/*" \
-  "watch/AGENTS.md" \
-  "watch/CLAUDE.md" \
-  > /dev/null 2>&1 || true
+entries="$(unzip -Z1 "$OUT")"
+drop=()
+while IFS= read -r entry; do
+  case "$entry" in
+    watch/hooks/*|watch/commands/*|watch/.claude-plugin/*|watch/.codex-plugin/*|watch/AGENTS.md|watch/CLAUDE.md)
+      drop+=("$entry") ;;
+  esac
+done <<< "$entries"
+if [ "${#drop[@]}" -gt 0 ]; then
+  zip -d "$OUT" "${drop[@]}" > /dev/null
+fi
+python3 - "$OUT" <<'CHECK'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    forbidden = [name for name in archive.namelist()
+                 if name in {"watch/AGENTS.md", "watch/CLAUDE.md"}
+                 or name.startswith(tuple("watch/" + part + "/" for part in
+                                          ("hooks", "commands", ".claude-plugin", ".codex-plugin")))]
+    if forbidden:
+        raise SystemExit("error: forbidden development files remain in skill archive")
+CHECK
 
 COUNT=$(unzip -l "$OUT" | tail -1 | awk '{print $2}')
 SIZE=$(du -h "$OUT" | cut -f1)

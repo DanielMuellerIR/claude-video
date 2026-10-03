@@ -17,6 +17,7 @@ Extraction strategy:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
@@ -345,16 +346,10 @@ def extract(
         "-y",
     ]
 
-    # -ss vor -i = schneller Seek (Keyframe-Snap, reicht für Vorschau-Frames)
-    if start_seconds is not None:
-        cmd += ["-ss", f"{start_seconds:.3f}"]
-    if end_seconds is not None:
-        cmd += ["-to", f"{end_seconds:.3f}"]
-
-    # Aufrunden behaelt den Bereichsanfang statt Bilder um ein halbes
-    # Sampling-Intervall vorzuziehen und sehr kurze Clips zu verlieren.
-    # start_time=0 bindet auch nicht framegenaue Seeks an den Bereichsstart.
-    filters = f"fps={fps}:round=up:start_time=0"
+    # Vorherige Quellbilder behalten: Input-Seek verwirft bei niedriger
+    # Bildrate das am Bereichsanfang noch angezeigte Bild.
+    offset = start_seconds or 0.0
+    filters = f"setpts=PTS-STARTPTS-{offset}/TB,fps={fps}:round=up:start_time=0"
     if end_seconds is not None:
         # Ausgabe--t und trim runden auf Sampling-Ticks. Stattdessen genau
         # die Samples vor dem exklusiven Ende zulassen, ohne Rundungsartefakte.
@@ -548,44 +543,29 @@ def extract_smart(
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be finite and greater than zero")
+    return parsed
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print(
-            "usage: frames.py <video-path> <out-dir> [--fps F] [--resolution W] "
-            "[--max-frames N] [--start T] [--end T] [--scene-threshold F] [--no-classify]",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-
-    video = sys.argv[1]
-    out = Path(sys.argv[2])
-    args = sys.argv[3:]
-
-    fps_override = None
-    resolution = 1600
-    max_frames = 100
-    start_arg = None
-    end_arg = None
-    scene_threshold = 0.3
-    no_classify = False
-    i = 0
-    while i < len(args):
-        if args[i] == "--fps":
-            fps_override = float(args[i + 1]); i += 2
-        elif args[i] == "--resolution":
-            resolution = int(args[i + 1]); i += 2
-        elif args[i] == "--max-frames":
-            max_frames = int(args[i + 1]); i += 2
-        elif args[i] == "--start":
-            start_arg = args[i + 1]; i += 2
-        elif args[i] == "--end":
-            end_arg = args[i + 1]; i += 2
-        elif args[i] == "--scene-threshold":
-            scene_threshold = float(args[i + 1]); i += 2
-        elif args[i] == "--no-classify":
-            no_classify = True; i += 1
-        else:
-            i += 1
+    parser = argparse.ArgumentParser(description="Extract video preview frames")
+    parser.add_argument("video")
+    parser.add_argument("out", type=Path)
+    parser.add_argument("--fps", type=positive_float)
+    parser.add_argument("--resolution", type=int, default=1600)
+    parser.add_argument("--max-frames", type=int, default=100)
+    parser.add_argument("--start")
+    parser.add_argument("--end")
+    parser.add_argument("--scene-threshold", type=float, default=0.3)
+    parser.add_argument("--no-classify", action="store_true")
+    options = parser.parse_args()
+    video, out = options.video, options.out
+    fps_override, resolution, max_frames = options.fps, options.resolution, options.max_frames
+    start_arg, end_arg = options.start, options.end
+    scene_threshold, no_classify = options.scene_threshold, options.no_classify
 
     meta = get_metadata(video)
     start_sec = parse_time(start_arg)

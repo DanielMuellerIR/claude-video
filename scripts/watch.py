@@ -17,7 +17,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from download import download, is_url, normalize_yt_url  # noqa: E402
-from frames import extract_smart, format_time, get_metadata, parse_time, sampling_plan, validate_range  # noqa: E402
+from frames import extract_smart, format_time, get_metadata, parse_time, sampling_plan, validate_range, positive_float as _positive_float  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 from whisper import resolve_whisper_backend, transcribe_video  # noqa: E402
 from workdir import work_dir  # noqa: E402
@@ -30,13 +30,6 @@ def _print_json_block(value: object) -> None:
     print("```json")
     print(json.dumps(value, ensure_ascii=False, indent=2))
     print("```")
-
-
-def _positive_float(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed) or parsed <= 0:
-        raise argparse.ArgumentTypeError("must be finite and greater than zero")
-    return parsed
 
 
 def _warn_untrusted(source: str, detail: object) -> None:

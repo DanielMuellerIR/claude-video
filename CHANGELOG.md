@@ -2,6 +2,18 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.1.11] — 2026-10-03
+
+### Fixed
+- Focused uniform sampling retains the frame already displayed at a fractional start, including low and variable source frame rates.
+- Skill packaging rejects failed ZIP exclusions and verifies that development/plugin files are absent.
+- Interrupted HTTP response bodies follow transport retries and the existing transcript-free report fallback.
+- Local Whisper detection verifies the whisper.cpp flags and uses the verified executable path.
+- The standalone frame CLI rejects unknown or incomplete options with argparse; both entry points share finite positive FPS validation.
+
+### Tests
+- Real low-rate/VFR video fixtures, HTTP-decoder and Watch fallback checks, isolated CLI probes, and normal/failing/no-op ZIP builds.
+
 ## [0.1.10] — 2026-10-02
 
 ### Fixed
