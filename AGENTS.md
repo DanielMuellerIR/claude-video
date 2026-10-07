@@ -23,11 +23,10 @@ die **Portierung** hierher, sauber entkoppelt:
 1. **OCR-Kern vorhanden:** `scripts/textframes.py` und `scripts/ocr.swift` liefern
    Textframes mit konservativer Text-Deduplizierung in einem exklusiven Ausgabeordner
    mit `frames/`, `texte.md` und `texte.json`. macOS, ffmpeg und Swift sind erforderlich.
-2. **Abhängigkeiten entkoppeln / self-contained machen:** keine absoluten Pfade, keine
-   internen Hostnamen. Die LLM-gestützte Klassifikation/Filterung env-getrieben machen
-   (Muster `LLM_RUN`/`LLM_HOST` wie bereits in `watch.py`, Commit `75001af`) und optional —
-   ohne LLM muss ein reiner OCR-Dedup-Lauf funktionieren. macOS-spezifisch (Apple Vision):
-   klar dokumentieren bzw. Fallback prüfen.
+2. **Filter vorhanden:** Wiederkehrende kleine Randtexte und eindeutige Abo-Aufrufe
+   werden heuristisch entfernt. Die optionale Klassifikation nutzt `LLM_RUN`, `LLM_HOST`
+   und `LLM_MODEL`; ohne Konfiguration und bei Fehlern bleiben ungeprüfte Textframes
+   erhalten. `--no-filter` und `--no-classify` erlauben den reinen OCR-Dedup-Lauf.
 3. **Doku:** `README.md`/`README.de.md` um den Textframe-Modus ergänzen (zweisprachig,
    synchron), `SKILL.md`/`CHANGELOG.md` nachziehen.
 4. **Tests:** Dedup-Logik (neuer Frame nur bei Textänderung) + Filter (Wasserzeichen/

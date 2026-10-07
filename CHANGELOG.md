@@ -2,6 +2,12 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.1.13] — 2026-10-07
+
+### Added
+- Textframe overlay filters remove recurring small border text and explicit subscription/like prompts; `--no-filter` retains all recognized text for verification.
+- Optional textframe classification uses `LLM_RUN`, `LLM_HOST`, and `LLM_MODEL`. Missing configuration skips the helper; timeouts, failures, and ambiguous responses retain unchecked frames and report the status. `--no-classify` disables it.
+
 ## [0.1.12] — 2026-10-07
 
 ### Added
