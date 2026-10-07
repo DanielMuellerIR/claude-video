@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -111,7 +112,7 @@ def _scaffold_env() -> bool:
 
 
 def _write_setup_complete() -> None:
-    """Idempotently append SETUP_COMPLETE=true to .env.
+    """Idempotently set SETUP_COMPLETE=true in .env.
 
     Used only after a fully successful install (deps + key). Future sessions
     detect this marker to skip wizard-style UI and stay silent.
@@ -119,15 +120,18 @@ def _write_setup_complete() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     existing = ""
     if CONFIG_FILE.exists():
-        existing = CONFIG_FILE.read_text(encoding="utf-8")
-        for line in existing.splitlines():
-            if line.strip().startswith("SETUP_COMPLETE="):
-                return
-        if existing and not existing.endswith("\n"):
-            existing += "\n"
-        CONFIG_FILE.write_text(existing + "SETUP_COMPLETE=true\n", encoding="utf-8")
+        try:
+            existing = CONFIG_FILE.read_text(encoding="utf-8")
+        except UnicodeError as exc:
+            raise SystemExit("Cannot update non-UTF-8 configuration; convert the .env file to UTF-8 first.") from exc
     else:
-        CONFIG_FILE.write_text(ENV_TEMPLATE + "\nSETUP_COMPLETE=true\n", encoding="utf-8")
+        existing = ENV_TEMPLATE
+    updated, count = re.subn(r"(?m)^[ \t]*SETUP_COMPLETE[ \t]*=[^\r\n]*", "SETUP_COMPLETE=true", existing)
+    if not count:
+        if updated and not updated.endswith("\n"):
+            updated += "\n"
+        updated += "SETUP_COMPLETE=true\n"
+    CONFIG_FILE.write_text(updated, encoding="utf-8")
     try:
         CONFIG_FILE.chmod(0o600)
     except OSError:

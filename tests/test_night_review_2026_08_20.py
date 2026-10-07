@@ -76,11 +76,13 @@ class FrameRegressionTests(unittest.TestCase):
 
     def test_ffprobe_failure_contains_real_error(self) -> None:
         result = SimpleNamespace(returncode=1, stderr="broken container", stdout="")
+        diagnostic = io.StringIO()
         with mock.patch.object(frames.shutil, "which", return_value="ffprobe"), mock.patch.object(
             frames.subprocess, "run", return_value=result
-        ):
-            with self.assertRaisesRegex(SystemExit, "broken container"):
+        ), contextlib.redirect_stderr(diagnostic):
+            with self.assertRaisesRegex(SystemExit, "ffprobe failed"):
                 frames.get_metadata("broken.mp4")
+        self.assertIn('untrusted ffprobe diagnostic: "broken container"', diagnostic.getvalue())
 
 
 class BackendRegressionTests(unittest.TestCase):

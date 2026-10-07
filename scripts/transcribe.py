@@ -84,12 +84,12 @@ def filter_range(
     start_seconds: float | None,
     end_seconds: float | None,
 ) -> list[dict]:
-    """Return segments whose time range overlaps [start, end]."""
+    """Return segments with positive overlap with [start, end)."""
     if start_seconds is None and end_seconds is None:
         return segments
     lo = start_seconds if start_seconds is not None else float("-inf")
     hi = end_seconds if end_seconds is not None else float("inf")
-    return [seg for seg in segments if seg["end"] >= lo and seg["start"] <= hi]
+    return [seg for seg in segments if seg["end"] > lo and seg["start"] < hi]
 
 
 def format_transcript(segments: list[dict]) -> str:

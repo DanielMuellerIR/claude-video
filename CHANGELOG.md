@@ -2,6 +2,24 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.1.12] — 2026-10-07
+
+### Added
+- Standalone `scripts/textframes.py` extracts OCR text frames on macOS using the bundled Apple Vision helper, with no Python packages or LLM configuration required.
+- Text-frame output uses exclusive marked working directories, `frames/`, `texte.md`, and `texte.json`; repeated text is collapsed and growing slides keep their fullest sampled frame.
+- Exact visual comparisons and conservative text matching retain changes to numbers, punctuation, and case. OCR failures abort instead of silently producing an empty result.
+
+### Fixed
+- Text-frame deduplication preserves OCR line order, repeated lines, and whitespace within code.
+- Focused transcripts exclude captions that only touch the requested start or end.
+- Non-UTF-8 configuration files no longer prevent selecting local Whisper; setup preserves those files and reports a controlled failure.
+- Successful setup replaces stale completion markers and reapplies private file permissions.
+- ffprobe and uniform frame-extraction failures encode and label untrusted diagnostics.
+
+### Limitations
+- Text-frame OCR requires macOS and the Swift compiler. Sampling defaults to one frame per second; shorter text appearances can be missed.
+- Watermark/promotion filtering and transcript embedding are not yet included in the standalone text-frame command.
+
 ## [0.1.11] — 2026-10-03
 
 ### Fixed

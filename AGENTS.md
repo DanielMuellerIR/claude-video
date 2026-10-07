@@ -20,8 +20,9 @@ Eine funktionierende Engine dafür existiert bereits als eigenständiges Skript 
 separaten, **nicht-öffentlichen** Tooling-Repo (Apple-Vision-OCR + Text-Dedup). Aufgabe ist
 die **Portierung** hierher, sauber entkoppelt:
 
-1. **Engine portieren** → neues `scripts/textframes.py`, Geschwister-Skript zu `watch.py`
-   (gleicher Aufruf-/Ausgabestil: Ausgabeordner mit `frames/` + optional `transkript.md`).
+1. **OCR-Kern vorhanden:** `scripts/textframes.py` und `scripts/ocr.swift` liefern
+   Textframes mit konservativer Text-Deduplizierung in einem exklusiven Ausgabeordner
+   mit `frames/`, `texte.md` und `texte.json`. macOS, ffmpeg und Swift sind erforderlich.
 2. **Abhängigkeiten entkoppeln / self-contained machen:** keine absoluten Pfade, keine
    internen Hostnamen. Die LLM-gestützte Klassifikation/Filterung env-getrieben machen
    (Muster `LLM_RUN`/`LLM_HOST` wie bereits in `watch.py`, Commit `75001af`) und optional —

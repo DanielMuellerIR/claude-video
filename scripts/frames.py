@@ -118,7 +118,7 @@ def get_metadata(video_path: str) -> dict:
         text=True,
     )
     if result.returncode != 0:
-        raise SystemExit(f"ffprobe failed: {result.stderr.strip()}")
+        _fail_media_tool("ffprobe", result.stderr)
 
     data = json.loads(result.stdout or "{}")
     streams = data.get("streams", [])
@@ -135,6 +135,12 @@ def get_metadata(video_path: str) -> dict:
         "size_bytes": int(fmt.get("size") or 0),
         "has_audio": audio_stream is not None,
     }
+
+
+def _fail_media_tool(tool: str, diagnostic: str) -> None:
+    print(f"[frames] untrusted {tool} diagnostic: "
+          f"{json.dumps(diagnostic.strip()[:2000], ensure_ascii=False)}", file=sys.stderr)
+    raise SystemExit(f"{tool} failed; see the labelled diagnostic.")
 
 
 def auto_fps(duration_seconds: float, max_frames: int = 100) -> tuple[float, int]:
@@ -367,7 +373,7 @@ def extract(
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise SystemExit(f"ffmpeg frame extraction failed: {result.stderr.strip()}")
+        _fail_media_tool("ffmpeg", result.stderr)
 
     offset = start_seconds or 0.0
     frames = sorted(out_dir.glob("frame_*.jpg"))

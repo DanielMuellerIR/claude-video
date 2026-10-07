@@ -84,6 +84,9 @@ def _dotenv_value(path: Path, name: str) -> str | None:
             if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
                 value = value[1:-1]
             return value or None
+    except UnicodeError:
+        print(f"[watch] ignoring non-UTF-8 configuration file: {json.dumps(str(path))}", file=sys.stderr)
+        return None
     except OSError:
         return None
     return None
