@@ -1,6 +1,6 @@
 {
   "name": "watch",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Inspect videos with scene frames and captions or Whisper; capture displayed slides, code and text with optional macOS OCR textframes.",
   "author": {
     "name": "Bradley Bonanno"

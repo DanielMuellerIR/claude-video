@@ -74,6 +74,8 @@ Der Befehl wählt Bilder anhand von Szenenwechseln aus und fällt bei Bedarf auf
 
 Die Standard-Bildbudgets steigen mit der Dauer bis auf 100 Bilder. Videos über zehn Minuten werden nur grob abgedeckt; für Details einen Ausschnitt wählen. Bei unbekannter Dauer gilt die angegebene Bildobergrenze.
 
+Der direkte Aufruf `python3 scripts/frames.py recording.mp4 ./results --no-classify` erzeugt ebenfalls einen exklusiven Ordner `watch-*/frames/` und meldet `work_dir` in der JSON-Ausgabe. Python-Aufrufe von `extract` oder `extract_scene` benötigen einen Ordner ohne vorhandene Bilder nach dem Muster `frame_*.jpg`; vorhandene Bilder bleiben erhalten und der Aufruf wird abgelehnt.
+
 ## Textframe-Modus (macOS)
 
 ```bash
@@ -131,6 +133,8 @@ Native Untertitel haben Vorrang. Der Downloader fordert derzeit englische Untert
 Die Auswahl erfolgt zuerst über die CLI, dann `WATCH_WHISPER_BACKEND`, danach über verfügbare Backends in der Reihenfolge Groq, OpenAI, lokal. Fokussierte Szenenläufe laden nur den angeforderten Audiobereich hoch. Lange Cloud-Audios werden in überlappende Abschnitte geteilt; lokales Whisper hat keine durch die Anwendung gesetzte Dauergrenze.
 
 Lokale Modellkonfiguration: `WATCH_WHISPER_MODEL` (Standard `large-v3-turbo`) und `WATCH_WHISPER_MODELS_DIR` (Standard `~/.cache/yt-transcribe/models`). Modellnamen dürfen Buchstaben, Ziffern, `.`, `_` oder `-` enthalten.
+
+Der direkte Sprachaufruf `python3 scripts/whisper.py recording.mp4 new-audio.mp3 --backend groq` gibt Sprachsegmente als JSON aus. Die Audioextraktion benötigt einen neuen Ausgabepfad und erhält vorhandene Dateien; lokales Whisper verwendet stattdessen eine isolierte temporäre WAV-Datei.
 
 ## Optionale Bildklassifikation
 

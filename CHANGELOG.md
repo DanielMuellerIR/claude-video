@@ -2,6 +2,16 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.1.15] — 2026-10-07
+
+### Fixed
+- Frame extraction preserves existing images, including an input image in the output directory. The standalone frame CLI creates an exclusive marked working directory; Python extractors reject existing frame images.
+- Audio extraction rejects existing output paths, including the source itself. The standalone Whisper CLI validates missing and unknown options before doing any work.
+- Scene detection uses source-relative timestamps, excludes transitions at the requested end, and captures the image already displayed at a fractional range start.
+- Malformed local/cloud Whisper response structures, text, intervals, and local JSON encoding produce controlled transcription failures, preserving the video report.
+- Whisper tool and HTTP diagnostics are bounded, JSON-encoded, and labelled as untrusted. Echoed API keys are redacted from response diagnostics.
+- Invalid negative or non-finite retry delays use the default retry schedule. Unrepresentable or reversed caption intervals are skipped without losing valid cues.
+
 ## [0.1.14] — 2026-10-07
 
 ### Added

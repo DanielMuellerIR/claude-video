@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -38,14 +39,22 @@ def parse_vtt(path: str) -> list[dict]:
             if "-->" in lines[i]:
                 print(
                     "[watch] untrusted malformed caption timestamp: "
-                    f"{json.dumps(lines[i], ensure_ascii=False)}",
+                    f"{json.dumps(lines[i][:2000], ensure_ascii=False)}",
                     file=sys.stderr,
                 )
             i += 1
             continue
 
-        start = _to_seconds(*match.groups()[:4])
-        end = _to_seconds(*match.groups()[4:])
+        try:
+            start = _to_seconds(*match.groups()[:4])
+            end = _to_seconds(*match.groups()[4:])
+            if not (math.isfinite(start) and math.isfinite(end) and 0 <= start <= end):
+                raise ValueError("invalid caption interval")
+        except (ValueError, OverflowError):
+            print("[watch] untrusted invalid caption interval: "
+                  + json.dumps(lines[i][:2000], ensure_ascii=False), file=sys.stderr)
+            i += 1
+            continue
         i += 1
 
         cue_lines: list[str] = []

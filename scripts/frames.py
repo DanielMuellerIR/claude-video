@@ -27,6 +27,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workdir import work_dir
+
 
 MAX_FPS = 2.0
 MIN_SCENE_FRAMES = 5    # Untergrenze; darunter → Fallback auf gleichmäßiges Sampling
@@ -143,6 +146,13 @@ def _fail_media_tool(tool: str, diagnostic: str) -> None:
     raise SystemExit(f"{tool} failed; see the labelled diagnostic.")
 
 
+def _prepare_output(out_dir: Path) -> None:
+    """Vorhandene Bilder koennen Quellen oder fremde Ergebnisse sein."""
+    if any(out_dir.glob("frame_*.jpg")):
+        raise SystemExit("frame output directory contains existing images; choose an empty directory")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+
 def auto_fps(duration_seconds: float, max_frames: int = 100) -> tuple[float, int]:
     """Pick fps that targets a sensible frame budget for full-video scans."""
     if duration_seconds <= 0:
@@ -253,19 +263,15 @@ def extract_scene(
     if shutil.which("ffmpeg") is None:
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for existing in out_dir.glob("frame_*.jpg"):
-        existing.unlink()
+    _prepare_output(out_dir)
 
     # Erster Durchlauf: nur Zeitstempel sammeln (kein Bild-Output, sehr schnell)
     probe_cmd: list[str] = ["ffmpeg", "-hide_banner", "-y"]
-    if start_seconds is not None:
-        probe_cmd += ["-ss", f"{start_seconds:.3f}"]
     if end_seconds is not None:
-        probe_cmd += ["-to", f"{end_seconds:.3f}"]
+        probe_cmd += ["-to", str(end_seconds)]
     probe_cmd += [
         "-i", str(Path(video_path).resolve()),
-        "-vf", f"select='gt(scene,{scene_threshold})',showinfo",
+        "-vf", f"setpts=PTS-STARTPTS,select='gt(scene,{scene_threshold})',showinfo",
         "-fps_mode", "passthrough",   # neueres Äquivalent zu -vsync vfr
         "-f", "null",
         "-",
@@ -275,10 +281,10 @@ def extract_scene(
     # ffmpeg schreibt showinfo nach stderr; exit-Code ist 0 auch bei 0 Szenen
     timestamps = _parse_pts_times(probe.stderr)
 
-    # Offset durch -ss korrigieren: pts_time ist relativ zum Clip-Start nach -ss
-    # codereview-ok: -ss vor -i ohne -copyts liefert relatives pts_time, +offset ist die korrekte Absolut-Umrechnung (empirisch mit ffmpeg 8.1 verifiziert) (2026-07-01)
-    offset = start_seconds or 0.0
-    timestamps = [t + offset for t in timestamps]
+    # Ohne Input-Seek bleiben die Quellzeiten auch bei niedriger Bildrate exakt.
+    range_start = start_seconds or 0.0
+    timestamps = [t for t in timestamps if t >= range_start
+                  and (end_seconds is None or t < end_seconds)]
 
     if len(timestamps) < MIN_SCENE_FRAMES:
         # Zu wenige Szenen → Fallback signalisieren
@@ -286,7 +292,6 @@ def extract_scene(
 
     # select=gt(scene,...) meldet nur Uebergaenge. Der Bereichsanfang ist aber
     # oft Titelkarte oder Hook und muss unabhaengig von spaeteren Schnitten mit.
-    range_start = start_seconds or 0.0
     if abs(timestamps[0] - range_start) > 0.5:
         timestamps.insert(0, range_start)
 
@@ -298,12 +303,17 @@ def extract_scene(
     frames: list[dict] = []
     for idx, ts in enumerate(sorted(kept_times)):
         out_path = out_dir / f"frame_{idx:04d}.jpg"
-        frame_cmd: list[str] = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-ss", f"{ts:.3f}",
+        frame_cmd: list[str] = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-n"]
+        filters = ""
+        if ts == range_start:
+            # Der Bereich kann mitten in der Anzeigedauer eines Quellbilds beginnen.
+            filters = f"setpts=PTS-STARTPTS-{ts}/TB,fps=1:round=up:start_time=0,"
+        else:
+            frame_cmd += ["-ss", str(ts)]
+        frame_cmd += [
             "-i", str(Path(video_path).resolve()),
             # 'min(resolution,iw)' verhindert Hochskalieren über die Quellbreite
-            "-vf", f"scale='min({resolution},iw)':-2",
+            "-vf", filters + f"scale='min({resolution},iw)':-2",
             "-frames:v", "1",
             "-q:v", "4",
             str(out_path),
@@ -317,6 +327,7 @@ def extract_scene(
                 "scene_detected": True,
             })
         else:
+            out_path.unlink(missing_ok=True)
             print(
                 f"[frames] Warnung: Frame bei t={ts:.2f}s konnte nicht extrahiert werden",
                 file=sys.stderr,
@@ -340,16 +351,14 @@ def extract(
     if shutil.which("ffmpeg") is None:
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for existing in out_dir.glob("frame_*.jpg"):
-        existing.unlink()
+    _prepare_output(out_dir)
 
     output_pattern = str(out_dir / "frame_%04d.jpg")
     cmd: list[str] = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel", "error",
-        "-y",
+        "-n",
     ]
 
     # Vorherige Quellbilder behalten: Input-Seek verwirft bei niedriger
@@ -559,7 +568,7 @@ def positive_float(value: str) -> float:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract video preview frames")
     parser.add_argument("video")
-    parser.add_argument("out", type=Path)
+    parser.add_argument("out", type=Path, help="Parent for an exclusive watch-* output directory")
     parser.add_argument("--fps", type=positive_float)
     parser.add_argument("--resolution", type=int, default=1600)
     parser.add_argument("--max-frames", type=int, default=100)
@@ -595,19 +604,21 @@ if __name__ == "__main__":
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    frames, stats = extract_smart(
-        video, out,
-        fps=fps,
-        resolution=resolution,
-        max_frames=target,
-        start_seconds=start_sec,
-        end_seconds=end_sec,
-        scene_threshold=scene_threshold,
-        no_classify=no_classify,
-        fallback_max_frames=max_frames,
-    )
+    with work_dir(out) as work:
+        frames, stats = extract_smart(
+            video, work / "frames",
+            fps=fps,
+            resolution=resolution,
+            max_frames=target,
+            start_seconds=start_sec,
+            end_seconds=end_sec,
+            scene_threshold=scene_threshold,
+            no_classify=no_classify,
+            fallback_max_frames=max_frames,
+        )
     print(json.dumps(
         {
+            "work_dir": str(work),
             "meta": meta,
             "fps": fps,
             "target": target,

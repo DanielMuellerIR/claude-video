@@ -23,6 +23,7 @@ Local backend configuration (env vars):
 """
 from __future__ import annotations
 
+import argparse
 import http.client
 import io
 import json
@@ -211,13 +212,13 @@ def extract_audio(
     if shutil.which("ffmpeg") is None:
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _prepare_audio_output(out_path)
     before_input, after_input = _audio_range_args(start_seconds, end_seconds)
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel", "error",
-        "-y",
+        "-n",
         *before_input,
         "-i", str(Path(video_path).resolve()),
         *after_input,
@@ -230,7 +231,7 @@ def extract_audio(
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise SystemExit(f"ffmpeg audio extraction failed: {result.stderr.strip()}")
+        _fail_untrusted("ffmpeg audio extraction failed", result.stderr)
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise SystemExit("ffmpeg produced no audio — video may have no audio track")
     return out_path
@@ -249,13 +250,13 @@ def extract_audio_wav(
     if shutil.which("ffmpeg") is None:
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _prepare_audio_output(out_path)
     before_input, after_input = _audio_range_args(start_seconds, end_seconds)
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel", "error",
-        "-y",
+        "-n",
         *before_input,
         "-i", str(Path(video_path).resolve()),
         *after_input,
@@ -267,10 +268,16 @@ def extract_audio_wav(
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise SystemExit(f"ffmpeg WAV extraction failed: {result.stderr.strip()}")
+        _fail_untrusted("ffmpeg WAV extraction failed", result.stderr)
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise SystemExit("ffmpeg produced no WAV — video may have no audio track")
     return out_path
+
+
+def _prepare_audio_output(out_path: Path) -> None:
+    if out_path.exists() or out_path.is_symlink():
+        raise SystemExit("audio output already exists; choose a new output path")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def ensure_model_local(model: str | None = None) -> Path:
@@ -314,7 +321,7 @@ def ensure_model_local(model: str | None = None) -> Path:
             raise OSError("downloaded model is empty")
         tmp.replace(path)
     except Exception as exc:
-        raise SystemExit(f"[watch] model download failed ({url}): {exc}") from exc
+        _fail_untrusted("Whisper model download failed", str(exc))
     finally:
         tmp.unlink(missing_ok=True)
     return path
@@ -344,6 +351,43 @@ def _find_whisper_cli() -> str | None:
     return None
 
 
+def _fail_untrusted(message: str, diagnostic: str) -> None:
+    print("[whisper] untrusted backend diagnostic: "
+          + json.dumps(diagnostic.strip()[:2000], ensure_ascii=False), file=sys.stderr)
+    raise SystemExit(message + "; see the labelled diagnostic.")
+
+
+def _response_segments(data: dict, key: str) -> list[dict]:
+    if not isinstance(data, dict):
+        raise SystemExit("Whisper returned an invalid transcript object")
+    segments = data.get(key)
+    if segments is None:
+        return []
+    if not isinstance(segments, list) or any(not isinstance(seg, dict) for seg in segments):
+        raise SystemExit("Whisper returned invalid transcript segments")
+    return segments
+
+
+def _segment_text(value: object) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise SystemExit("Whisper returned invalid transcript text")
+    return value.strip()
+
+
+def _segment_interval(start: object, end: object, divisor: float = 1.0) -> tuple[float, float]:
+    try:
+        if isinstance(start, bool) or isinstance(end, bool):
+            raise ValueError
+        start_sec, end_sec = float(start) / divisor, float(end) / divisor
+        if not (math.isfinite(start_sec) and math.isfinite(end_sec) and 0 <= start_sec <= end_sec):
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        raise SystemExit("Whisper returned invalid transcript timestamps") from None
+    return round(start_sec, 2), round(end_sec, 2)
+
+
 def _segments_from_whisper_cpp_json(data: dict) -> list[dict]:
     """Convert whisper.cpp JSON output to the {start, end, text} segment format.
 
@@ -353,13 +397,14 @@ def _segments_from_whisper_cpp_json(data: dict) -> list[dict]:
     offsets are in MILLISECONDS — divide by 1000 to get seconds.
     """
     out: list[dict] = []
-    for seg in data.get("transcription") or []:
-        text = (seg.get("text") or "").strip()
+    for seg in _response_segments(data, "transcription"):
+        text = _segment_text(seg.get("text"))
         if not text:
             continue
-        offsets = seg.get("offsets") or {}
-        start_sec = round(float(offsets.get("from", 0)) / 1000.0, 2)
-        end_sec = round(float(offsets.get("to", 0)) / 1000.0, 2)
+        offsets = seg.get("offsets")
+        if not isinstance(offsets, dict):
+            raise SystemExit("Whisper returned invalid transcript offsets")
+        start_sec, end_sec = _segment_interval(offsets.get("from"), offsets.get("to"), 1000.0)
         out.append({"start": start_sec, "end": end_sec, "text": text})
     return out
 
@@ -412,15 +457,15 @@ def transcribe_local(
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            raise SystemExit(f"whisper.cpp failed (exit {result.returncode}):\n{result.stderr.strip()}")
+            _fail_untrusted(f"whisper.cpp failed (exit {result.returncode})", result.stderr)
 
         if not json_file.exists():
             raise SystemExit(f"whisper.cpp produced no JSON output (expected: {json_file})")
 
         try:
             data = json.loads(json_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            raise SystemExit(f"whisper.cpp JSON unreadable: {exc}") from exc
+        except (ValueError, UnicodeError, OSError) as exc:
+            _fail_untrusted("whisper.cpp JSON unreadable", str(exc))
 
         segments = _segments_from_whisper_cpp_json(data)
         if not segments:
@@ -500,12 +545,12 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
 
             # 4xx other than 429 are client errors — no retry will fix them.
             if 400 <= exc.code < 500 and exc.code != 429:
-                raise SystemExit(f"Whisper request failed: {exc}{detail}")
+                _fail_untrusted(f"Whisper request failed (HTTP {exc.code})", detail.replace(api_key, "[redacted]"))
 
             if exc.code == 429:
                 rate_limit_hits += 1
                 if rate_limit_hits >= MAX_429_RETRIES:
-                    raise SystemExit(f"Whisper request failed: {exc}{detail}")
+                    _fail_untrusted("Whisper request failed (HTTP 429)", detail.replace(api_key, "[redacted]"))
                 delay = _retry_after(exc) or RETRY_BASE_DELAY * (2 ** attempt) + 1
             else:
                 delay = RETRY_BASE_DELAY * (2 ** attempt)
@@ -523,7 +568,7 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
             if attempt < MAX_ATTEMPTS - 1:
                 delay = RETRY_BASE_DELAY * (attempt + 1)
                 print(
-                    f"[watch] whisper network error ({type(exc).__name__}: {exc}) — "
+                    f"[watch] whisper network error ({type(exc).__name__}) — "
                     f"retrying in {delay:.1f}s (attempt {attempt + 2}/{MAX_ATTEMPTS})",
                     file=sys.stderr,
                 )
@@ -532,23 +577,23 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
 
         try:
             return json.loads(payload)
-        except json.JSONDecodeError as exc:
-            raise SystemExit(f"Whisper returned non-JSON response: {exc}: {payload[:200]}")
+        except ValueError:
+            _fail_untrusted("Whisper returned non-JSON response", payload.replace(api_key, "[redacted]"))
 
-    raise SystemExit(
-        f"Whisper request failed after {MAX_ATTEMPTS} attempts: {last_exc}{last_detail}"
-    )
+    _fail_untrusted(f"Whisper request failed after {MAX_ATTEMPTS} attempts ({type(last_exc).__name__})",
+                    last_detail.replace(api_key, "[redacted]"))
 
 
 def _read_error_body(exc: urllib.error.HTTPError) -> str:
     try:
-        body = exc.read()
+        with exc:
+            body = exc.read()
     except Exception:
         return ""
     if not body:
         return ""
     try:
-        return f" — {body.decode('utf-8', errors='replace')[:400]}"
+        return body.decode('utf-8', errors='replace')[:2000]
     except Exception:
         return ""
 
@@ -558,7 +603,8 @@ def _retry_after(exc: urllib.error.HTTPError) -> float | None:
     if not header:
         return None
     try:
-        return float(header)
+        delay = float(header)
+        return delay if math.isfinite(delay) and delay >= 0 else None
     except ValueError:
         return None
 
@@ -566,18 +612,19 @@ def _retry_after(exc: urllib.error.HTTPError) -> float | None:
 def _segments_from_response(data: dict) -> list[dict]:
     """Convert Whisper verbose_json into our {start, end, text} segment format."""
     out: list[dict] = []
-    for seg in data.get("segments") or []:
-        text = (seg.get("text") or "").strip()
+    for seg in _response_segments(data, "segments"):
+        text = _segment_text(seg.get("text"))
         if not text:
             continue
+        start, end = _segment_interval(seg.get("start"), seg.get("end"))
         out.append({
-            "start": round(float(seg.get("start") or 0.0), 2),
-            "end": round(float(seg.get("end") or 0.0), 2),
+            "start": start,
+            "end": end,
             "text": text,
         })
 
     if not out:
-        full = (data.get("text") or "").strip()
+        full = _segment_text(data.get("text"))
         if full:
             out.append({"start": 0.0, "end": 0.0, "text": full})
 
@@ -635,7 +682,7 @@ def _split_audio_chunk(audio_path: Path, chunk_dir: Path, start_sec: float, dura
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise SystemExit(f"ffmpeg chunk split failed (chunk {index}): {result.stderr.strip()}")
+        _fail_untrusted(f"ffmpeg chunk split failed (chunk {index})", result.stderr)
     if not chunk_path.exists() or chunk_path.stat().st_size == 0:
         raise SystemExit(f"ffmpeg produced empty chunk {index}")
     return chunk_path
@@ -898,15 +945,10 @@ def transcribe_video(
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("usage: whisper.py <video-path> [<audio-out.mp3>] [--backend groq|openai|local]", file=sys.stderr)
-        raise SystemExit(2)
-
-    video = sys.argv[1]
-    audio_out = Path(sys.argv[2]) if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else Path("audio.mp3")
-    backend_override = None
-    if "--backend" in sys.argv:
-        backend_override = sys.argv[sys.argv.index("--backend") + 1]
-
-    segments, backend = transcribe_video(video, audio_out, backend=backend_override)
+    parser = argparse.ArgumentParser(description="Transcribe a video with Whisper")
+    parser.add_argument("video")
+    parser.add_argument("audio_out", nargs="?", type=Path, default=Path("audio.mp3"))
+    parser.add_argument("--backend", choices=_WHISPER_BACKENDS)
+    options = parser.parse_args()
+    segments, backend = transcribe_video(options.video, options.audio_out, backend=options.backend)
     print(json.dumps({"backend": backend, "segments": segments}, indent=2))

@@ -92,7 +92,7 @@ class FrameSelectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out_dir = Path(tmp) / "frames"
             probe_stderr = "\n".join(
-                f"[showinfo] pts_time:{second}.000" for second in range(1, 6)
+                f"[showinfo] pts_time:{second}.000" for second in range(11, 16)
             )
 
             def fake_run(command: list[str], **_: object) -> SimpleNamespace:

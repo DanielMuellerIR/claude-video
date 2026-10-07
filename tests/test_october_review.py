@@ -28,7 +28,7 @@ class FrameRangeTests(unittest.TestCase):
                             '-c:v', 'ffv1', str(video)], check=True, capture_output=True)
             for start, end in ((.25, .75), (1.01, 1.9)):
                 with self.subTest(start=start):
-                    result = frames.extract(str(video), root / 'frames', fps=2,
+                    result = frames.extract(str(video), root / f'frames-{start}', fps=2,
                                             resolution=16, start_seconds=start, end_seconds=end)
                     for frame in result:
                         pixels = subprocess.run(['ffmpeg', '-v', 'error', '-i', frame['path'],

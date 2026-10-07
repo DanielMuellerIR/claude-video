@@ -74,6 +74,8 @@ The command uses scene changes, with uniform sampling as a fallback, and prints 
 
 Default frame budgets grow with duration, up to 100 images. Videos over ten minutes receive sparse coverage; use a focused range when detail matters. Unknown duration uses the user cap.
 
+The lower-level CLI `python3 scripts/frames.py recording.mp4 ./results --no-classify` also creates an exclusive `watch-*/frames/` directory and reports `work_dir` in its JSON output. Python callers of `extract` or `extract_scene` must provide a directory without existing `frame_*.jpg` images; existing images are preserved and the call is rejected.
+
 ## Textframe mode (macOS)
 
 ```bash
@@ -131,6 +133,8 @@ Native captions are preferred. The downloader currently requests English caption
 Selection is CLI choice, then `WATCH_WHISPER_BACKEND`, then available Groq, OpenAI, or local backend. Focused scene runs upload only their requested audio range. Long cloud audio is split into overlapping chunks; local Whisper has no application-imposed duration limit.
 
 Local model configuration: `WATCH_WHISPER_MODEL` (default `large-v3-turbo`) and `WATCH_WHISPER_MODELS_DIR` (default `~/.cache/yt-transcribe/models`). Model names use letters, numbers, `.`, `_`, or `-`.
+
+The lower-level speech CLI `python3 scripts/whisper.py recording.mp4 new-audio.mp3 --backend groq` prints JSON speech segments. Audio extraction requires a new output path and preserves existing files; local Whisper uses an isolated temporary WAV instead.
 
 ## Optional image classification
 
