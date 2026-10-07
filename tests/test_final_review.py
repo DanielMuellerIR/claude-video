@@ -172,6 +172,9 @@ class TranscriptValidationTests(unittest.TestCase):
             with self.subTest(header=header):
                 self.assertIsNone(whisper._retry_after(error))
             error.close()
+        error = HTTPError("https://example.test", 429, "rate limit", {"Retry-After": "1e308"}, None)
+        self.assertEqual(whisper._retry_after(error), 60)
+        error.close()
 
     def test_local_invalid_utf8_or_cli_failure_is_controlled_and_preserves_siblings(self):
         for exit_code in (0, 1):

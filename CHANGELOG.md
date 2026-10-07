@@ -10,7 +10,7 @@ All notable changes to `/watch` are documented here.
 - Scene detection uses source-relative timestamps, excludes transitions at the requested end, and captures the image already displayed at a fractional range start.
 - Malformed local/cloud Whisper response structures, text, intervals, and local JSON encoding produce controlled transcription failures, preserving the video report.
 - Whisper tool and HTTP diagnostics are bounded, JSON-encoded, and labelled as untrusted. Echoed API keys are redacted from response diagnostics.
-- Invalid negative or non-finite retry delays use the default retry schedule. Unrepresentable or reversed caption intervals are skipped without losing valid cues.
+- Invalid negative or non-finite retry delays use the default retry schedule; valid server delays are capped at 60 seconds. Unrepresentable or reversed caption intervals are skipped without losing valid cues.
 
 ## [0.1.14] — 2026-10-07
 

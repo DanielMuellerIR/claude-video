@@ -511,6 +511,7 @@ def _build_multipart(fields: dict[str, str], file_path: Path) -> tuple[bytes, st
 MAX_ATTEMPTS = 4       # initial + 3 retries
 MAX_429_RETRIES = 2
 RETRY_BASE_DELAY = 2.0
+MAX_RETRY_DELAY = 60.0
 
 
 def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> dict:
@@ -604,7 +605,7 @@ def _retry_after(exc: urllib.error.HTTPError) -> float | None:
         return None
     try:
         delay = float(header)
-        return delay if math.isfinite(delay) and delay >= 0 else None
+        return min(delay, MAX_RETRY_DELAY) if math.isfinite(delay) and delay >= 0 else None
     except ValueError:
         return None
 
