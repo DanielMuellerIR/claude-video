@@ -1,249 +1,168 @@
-# /watch
+# Claude Video /watch
 
-**Give Claude the ability to watch any video.**
+**🌐 Sprache / Language:** [English](README.md) · [Deutsch](README.de.md)
 
-Claude Code:
-```
-/plugin marketplace add bradautomates/claude-video
-/plugin install watch@claude-video
-```
+Claude Video extracts frames and speech from video URLs or local files so an assistant can inspect and discuss their contents.
 
-claude.ai (web): [download `watch.skill`](https://github.com/bradautomates/claude-video/releases/latest) and drop it into Settings → Capabilities → Skills.
+This fork of [Bradley Bonanno's claude-video](https://github.com/bradautomates/claude-video) adds local Whisper transcription, scene-based sampling, and an OCR textframe mode. The original MIT attribution is preserved in [LICENSE](LICENSE).
 
-Codex / generic skills:
-```bash
-git clone https://github.com/bradautomates/claude-video.git ~/.codex/skills/watch
-```
+## Choose a mode
 
-Zero config to start — `yt-dlp` and `ffmpeg` install on first run via `brew` on macOS (Linux/Windows print exact commands). Captions cover most public videos for free. A Whisper API key is only needed for the cloud fallback (`--whisper groq|openai`); the local backend (`--whisper local`) runs entirely offline with no key and no length limit.
+| Goal | Command | Result |
+| --- | --- | --- |
+| Summarize scenes or investigate a recording | `/watch <source> [question]` or `scripts/watch.py` | Selected images and a timestamped speech report |
+| Capture slides, code, and other displayed text | `scripts/textframes.py` | OCR-deduplicated images, `texte.md`, and `texte.json` |
+| Read speech alongside displayed text | `scripts/textframes.py --transcript` | Textframes plus `transkript.md` and speech segments in `transkript.json` |
 
----
-
-Claude can read a webpage, run a script, browse a repo. What it can't do, out of the box, is *watch a video*. You paste a YouTube link and it has to either guess from the title or pull a transcript that's missing 90% of what's on screen.
-
-With Claude Video `/watch` you can paste a URL or a local path, ask a question, and Claude downloads the video, extracts frames at an auto-scaled rate, pulls a timestamped transcript (free captions when available, Whisper API as fallback), and `Read`s every frame as an image. By the time it answers, it has *seen* the video and *heard* the audio.
-
-```
-/watch https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?
-```
-
-## What this fork adds
-
-This repository is a fork of [bradautomates/claude-video](https://github.com/bradautomates/claude-video) by Bradley Bonanno (MIT license). The original work is unchanged and fully credited.
-
-- **Local whisper.cpp backend** (`--whisper local` / `WATCH_WHISPER_BACKEND=local`): transcribes entirely on your machine using [whisper.cpp](https://github.com/ggerganov/whisper.cpp). No API key, no network traffic after the one-time model download, no length limit — arbitrarily long videos work offline. Setup instructions: `SKILL.md` → "Local backend".
-- **Automatic long-video handling**: the local path has no hard size limit; for cloud backends (Groq / OpenAI), audio longer than ~50 min is auto-split into time-based chunks with `ffmpeg`, each chunk is transcribed, and the results are merged with correct time offsets. No manual `--start`/`--end` required.
-- **YouTube URL normalization**: playlist and tracking parameters (`list`, `index`, `pp`, `si`, …) are stripped to the canonical `watch?v=ID` form, and `--no-playlist` is passed to `yt-dlp`, so pasting a Watch-Later or playlist URL fetches only the single intended video.
-- **Smarter, higher-resolution frames**: video is fetched at up to 1080p and frames are extracted at ~1600px (instead of 512px, so on-screen text and code are actually readable), chosen by `ffmpeg` scene-change detection (one frame per slide/screen transition rather than blind time-sampling). An optional local-model classifier drops pure talking-head frames when `LLM_RUN` and `LLM_HOST` are configured; `--no-classify` disables it explicitly.
-
----
-
-## Why this exists
-
-I built this because I'm constantly using video to keep up with content. If I see a YouTube video that's blowing up, I want to know how the creator structured the hook — what's on screen in the first 3 seconds, what they said, why it worked. That used to mean watching it myself with a notepad. Now I just paste the URL and ask.
-
-The other half is summarization. Most YouTube videos don't deserve 20 minutes of my attention. I hand the URL to Claude, it pulls the transcript, and tells me what actually happened. If the visual matters, frames come along too. If it's a podcast or a talking head, transcript is enough.
-
-Claude is great at reading and synthesizing — but until now, video was the one input I couldn't hand it. Pasting a YouTube link got you nothing useful. `/watch` closes that gap.
-
-## What people actually use it for
-
-**Analyze someone else's content.** `/watch https://youtu.be/<viral-video> what hook did they open with?` Claude looks at the first frames, reads the opening transcript, breaks down the structure. Same for ad creative, competitor launches, podcast intros, anything where the *how* matters as much as the *what*.
-
-**Diagnose a bug from a video.** Someone sends you a screen recording of something broken. `/watch bug-repro.mov what's going wrong?` Claude watches the recording, finds the frame where the issue appears, describes what's on screen, often catches the cause without you ever opening the file.
-
-**Summarize a video.** `/watch https://youtu.be/<long-thing> summarize this` does the obvious thing — pulls the structure, the key moments, what was actually said and shown. Faster than watching at 2x.
-
-## How it works
-
-1. **You paste a video and a question.** URL (anything yt-dlp supports — YouTube, Loom, TikTok, X, Instagram, plus a few hundred more) or a local path (`.mp4`, `.mov`, `.mkv`, `.webm`).
-2. **`yt-dlp` downloads it.** For URLs, into a temp working directory. For local files, no download — just probed in place.
-3. **`ffmpeg` extracts frames at an auto-scaled rate.** The frame budget is duration-aware: ≤30s gets ~30 frames, 30-60s gets ~40, 1-3min gets ~60, 3-10min gets ~80, longer gets 100 sparsely. Hard ceilings: 2 fps, 100 frames. JPEGs at 1600px wide by default (so on-screen text and code stay readable) — lower with `--resolution 512` to save tokens when fine detail isn't needed.
-4. **The transcript comes from one of two places.** First try: `yt-dlp` pulls native captions (manual or auto-generated) from the source. Free and instant. Fallback: extract a mono 16 kHz audio clip and ship it to Whisper — Groq's `whisper-large-v3` (preferred — cheaper and faster) or OpenAI's `whisper-1`. Focused runs upload only the requested `--start`/`--end` clip, and long cloud audio uses overlapping chunks so words at split boundaries retain context.
-5. **Frames + transcript are handed to Claude.** The script prints a JSON frame manifest with absolute timestamps and a JSON-encoded transcript. Claude `Read`s each frame in parallel — JPEGs render directly as images in its context.
-6. **Claude answers grounded in what's actually on screen and in the audio.** Not "based on the description" or "according to the title." It saw the frames. It heard the transcript. It answers the way someone who watched the video would.
-7. **Cleanup.** The script always creates and marks an exclusive `watch-*` working directory, even below a custom `--out-dir` parent. Failed runs remove that child automatically. After a successful run, the bundled cleanup helper verifies the marker before removing it.
-
-## Frame budget — why it matters
-
-Token cost is dominated by frames. Every frame is an image; image tokens add up fast. The script's auto-fps logic exists so you don't blow your context budget on a sparse scan of a 30-minute video that would have been better answered by a focused 30-second window.
-
-| Duration | Default frame budget | What you get |
-|----------|---------------------|--------------|
-| ≤30 s | ~30 frames | Dense — basically every key moment |
-| 30 s - 1 min | ~40 frames | Still dense |
-| 1 - 3 min | ~60 frames | Comfortable |
-| 3 - 10 min | ~80 frames | Sparse but workable |
-| > 10 min | 100 frames | "Sparse scan" warning — re-run focused |
-
-When the user names a moment ("around 2:30", "the last 30 seconds", "from 0:45 to 1:00"), pass `--start` / `--end`. Focused mode gets denser per-second budgets, capped at 2 fps. Far more useful than a sparse pass over the whole thing.
+The scene mode works on macOS, Linux, and Windows. OCR requires **macOS with Apple Vision and a Swift compiler**; no OCR fallback is bundled. Both Python commands use the standard library, without Python package dependencies.
 
 ## Install
 
-| Surface | Install |
-|---------|---------|
-| **Claude Code** | `/plugin marketplace add bradautomates/claude-video` then `/plugin install watch@claude-video` |
-| **claude.ai** (web) | [Download `watch.skill`](https://github.com/bradautomates/claude-video/releases/latest) → Settings → Capabilities → Skills → `+` |
-| **Codex** | `git clone https://github.com/bradautomates/claude-video.git ~/.codex/skills/watch` |
-| **Manual / dev** | `git clone https://github.com/bradautomates/claude-video.git ~/.claude/skills/watch` |
+For Claude Code:
 
-### Claude Code
-
-```
-/plugin marketplace add bradautomates/claude-video
+```text
+/plugin marketplace add DanielMuellerIR/claude-video
 /plugin install watch@claude-video
 ```
 
-Update later with `/plugin update watch@claude-video`.
-
-### claude.ai (web)
-
-1. [Download `watch.skill`](https://github.com/bradautomates/claude-video/releases/latest) from the latest release.
-2. Go to Settings → Capabilities → Skills.
-3. Click `+` and drop the file in.
-
-Enable "Code execution and file creation" under Capabilities first — the skill shells out to `ffmpeg` and `yt-dlp`, so it won't run without it.
-
-### Codex
+For Codex or another skill consumer:
 
 ```bash
-git clone https://github.com/bradautomates/claude-video.git ~/.codex/skills/watch
+git clone https://github.com/DanielMuellerIR/claude-video.git ~/.codex/skills/watch
 ```
 
-### Manual (developer)
+For direct CLI use, clone the repository and run the commands below from its root. Use `python` instead of `python3` on Windows.
+
+Scene mode needs `ffmpeg`, `ffprobe`, and `yt-dlp` for URL downloads. The setup helper checks dependencies and optional Whisper backends:
 
 ```bash
-git clone https://github.com/bradautomates/claude-video.git ~/.claude/skills/watch
+python3 scripts/setup.py --json
+python3 scripts/setup.py
 ```
 
-## First run
+On macOS the installer uses Homebrew; on Linux/Windows it prints installation commands. A missing Whisper backend does not prevent a frames-only run. For macOS OCR, install the tools if needed:
 
-On the first `/watch` call, the skill runs `scripts/setup.py --check`. If `ffmpeg` / `yt-dlp` aren't on your PATH, or no Whisper API key is set, it walks you through fixing it:
-
-- **macOS** — auto-runs `brew install ffmpeg yt-dlp`.
-- **Linux** — prints the exact `apt` / `dnf` / `pipx` commands.
-- **Windows** — prints the `winget` / `pip` commands.
-- **API key** — scaffolds `~/.config/watch/.env` (mode `0600`) with commented placeholders for `GROQ_API_KEY` (preferred) and `OPENAI_API_KEY`.
-
-After setup, preflight is silent and `/watch` just works. The check is a sub-100ms lookup, so it doesn't slow you down on subsequent runs.
-
-## Bring your own keys
-
-Captions cover the majority of public videos for free. The Whisper fallback only kicks in when a video genuinely has no caption track — typically local files, TikToks, some Vimeos, and the occasional caption-less YouTube upload.
-
-| Capability | What you need | Cost |
-|------------|---------------|------|
-| Download + native captions | `yt-dlp` + `ffmpeg` | Free |
-| Whisper local (`--whisper local`) | [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — no API key, offline, no length limit | Free (CPU/GPU time) |
-| Whisper cloud — preferred (`--whisper groq`) | [Groq API key](https://console.groq.com/keys) — `whisper-large-v3` | Cheap, fast |
-| Whisper cloud — alt (`--whisper openai`) | [OpenAI API key](https://platform.openai.com/api-keys) — `whisper-1` | Standard pricing |
-| Disable Whisper entirely | `--no-whisper` | Free, frames-only when no captions |
-
-## Usage
-
-```
-/watch https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?
-/watch https://www.tiktok.com/@user/video/123 summarize this
-/watch ~/Movies/screen-recording.mp4 when does the UI break?
-/watch https://vimeo.com/123 what tools does she mention?
+```bash
+brew install ffmpeg yt-dlp
+xcode-select --install
 ```
 
-Focused on a specific section — denser frame budget, lower token cost:
+The OCR helper compiles on first use into `${XDG_CACHE_HOME:-$HOME/.cache}/watch/ocr/`. The cache is independent of the checkout. Local videos do not need `yt-dlp`; OCR alone needs neither Whisper nor an API key.
+
+For claude.ai upload, build `dist/watch.skill` from a clean committed checkout with `bash scripts/build-skill.sh`. [Published release assets](https://github.com/DanielMuellerIR/claude-video/releases) may predate the latest source. The macOS-only OCR command cannot run in a Linux-hosted execution environment.
+
+## Scene mode
+
+```bash
+python3 scripts/watch.py "https://youtu.be/VIDEO_ID"
+python3 scripts/watch.py recording.mp4 --start 2:15 --end 2:45
+python3 scripts/watch.py recording.mp4 --no-whisper --no-classify
 ```
-/watch https://youtu.be/abc --start 2:15 --end 2:45
-/watch video.mp4 --start 50 --end 60
-/watch "$URL" --start 1:12:00            # from 1h12m to end
+
+The command uses scene changes, with uniform sampling as a fallback, and prints a Markdown report containing a JSON frame manifest and transcript. Source metadata and media text are untrusted data. The assistant reads the images to answer the question.
+
+| Option | Effect |
+| --- | --- |
+| `--start T`, `--end T` | Focus on a range (`SS`, `MM:SS`, or `HH:MM:SS`); timestamps remain absolute |
+| `--max-frames N` | Lower the user cap; hard maximum 100 |
+| `--resolution W` | Frame width, default 1600; images are not enlarged beyond source width |
+| `--fps F` | Uniform fallback rate, positive and capped at 2 fps; scene selection keeps its own budget |
+| `--no-classify` | Skip the optional vision classifier |
+| `--whisper local\|groq\|openai` | Select a specific speech backend |
+| `--no-whisper` | Keep native captions but skip Whisper fallback |
+| `--out-dir DIR` | Parent for an exclusive generated `watch-*` output directory |
+
+Default frame budgets grow with duration, up to 100 images. Videos over ten minutes receive sparse coverage; use a focused range when detail matters. Unknown duration uses the user cap.
+
+## Textframe mode (macOS)
+
+```bash
+# OCR and text images, without speech transcription
+python3 scripts/textframes.py recording.mp4 --out-dir ./results
+
+# More frequent samples; captions first, then local Whisper if needed
+python3 scripts/textframes.py "https://youtu.be/VIDEO_ID" --fps 2 --transcript --whisper local
+
+# Captions only: no audio transcription or cloud upload
+python3 scripts/textframes.py "https://youtu.be/VIDEO_ID" --transcript --no-whisper
+
+# Inspect plain OCR with both overlay filters and the LLM disabled
+python3 scripts/textframes.py recording.mp4 --no-filter --no-classify
 ```
 
-Other knobs (passed to `scripts/watch.py`):
+The pipeline samples the video, skips byte-identical consecutive images, runs Apple Vision, removes empty OCR results and selected overlays, then deduplicates consecutive text. A growing slide replaces its earlier prefix with the fullest sampled image. Line order, repeated lines, case, punctuation, and OCR whitespace remain significant. Separate returns to earlier content remain in the timeline.
 
-- `--max-frames N` — lower the frame cap for a tighter token budget.
-- `--resolution W` — frame width in px (default 1600, sized so on-screen text stays readable); lower to 512 to save tokens when fine detail isn't needed.
-- `--fps F` — set a positive sampling rate for the uniform fallback (still capped at 2 fps); scene selection keeps its duration-derived budget.
-- `--no-classify` — keep every extracted frame and skip the optional local vision classifier.
-- `--whisper local|groq|openai` — force a specific Whisper backend (`local` = offline whisper.cpp, no key, no length limit).
-- `--no-whisper` — disable transcription entirely; frames only.
-- `--out-dir DIR` — choose a parent for an exclusive generated `watch-*` work directory (default parent: system tmp).
+Recurring small footer/corner text and explicit subscription/like prompts are filtered conservatively. Normal body text and stable slide titles remain. These heuristics can still misclassify content; compare with `--no-filter` when completeness matters. Filtering changes the OCR text and image selection; it does not erase pixels from retained screenshots.
 
-## Limits
+| Option | Effect |
+| --- | --- |
+| `--fps F` | Sampling rate, default 1 fps; this mode has no 100-frame/2-fps scene-mode cap |
+| `--min-conf F` | Minimum OCR confidence from 0 to 1, default 0.45 |
+| `--ubiquitous-frac F` | Fraction of OCR samples needed to learn recurring border text, default 0.6; at least three observations |
+| `--no-filter` | Disable heuristic watermark/promotion filters |
+| `--no-classify` | Disable the configured optional LLM classifier |
+| `--transcript` | Add speech and embed every retained text image chronologically |
+| `--whisper local\|groq\|openai` | Speech backend; requires `--transcript` |
+| `--no-whisper` | Use captions only; requires `--transcript` |
+| `--out-dir DIR` / `--out DIR` | Parent for an exclusive generated output directory |
+| `--keep-temp` | Retain sampled images and downloaded/intermediate media for inspection |
 
-- **Best accuracy: under 10 minutes.** Past that the script prints a "sparse scan" warning — re-run focused on the part you actually care about with `--start`/`--end`.
-- **Hard caps: 2 fps, 100 frames.** Frame count drives token cost; the script enforces this even when the auto-fps math would imply higher.
-- **Unknown duration:** if `ffprobe` cannot determine the duration, the script warns and uses the requested frame cap instead of reducing the video to one frame.
-- **`--whisper local` has no length limit.** whisper.cpp runs entirely on your machine and handles arbitrarily long videos — the only constraints are disk space and CPU time.
-- **Cloud backends (Groq / OpenAI) have a 25 MB / ~50 min per-request limit.** For longer audio these backends auto-split the file into overlapping time-based chunks with ffmpeg, transcribe each chunk, and merge matching overlap segments with correct timestamps. No manual `--start`/`--end` is needed.
-- **No private platforms.** This skill doesn't log into anything. Public URLs and local files only. If yt-dlp can't reach it without auth, neither can `/watch`.
+Shorter text appearances can fall between samples. OCR can misread text and lose layout details such as code indentation. Conservative matching may retain near-duplicates instead of discarding real changes. Long or high-rate runs need time and temporary disk space for all sampled images.
 
-## Security boundary
+The JSON summary on stdout identifies the generated `work_dir`, index/report paths, filter counts, classifier status, and optional transcript status. Inside that directory:
 
-Video metadata, captions, and visible text in frames are untrusted media data.
-They can inform the answer, but they are never instructions to the agent: `/watch`
-must not execute commands, open links, disclose data, or change its workflow because
-the media says so. The report serializes all externally controlled text and paths as
-JSON, and the skill contract repeats this trust boundary before frames are read.
-Diagnostics derived from yt-dlp, captions, or remote APIs are likewise untrusted;
-the scripts label and JSON-encode them on stderr instead of printing raw multi-line text.
+| File | Contents |
+| --- | --- |
+| `frames/` | Selected JPEGs with sample timestamps in their filenames |
+| `texte.json` | Each frame's relative image path, text, lines, and `time_sec` |
+| `texte.md` | Image index with collapsible JSON-encoded OCR text |
+| `transkript.md` | With `--transcript`: text images and speech ordered by start timestamp |
+| `transkript.json` | With `--transcript`: speech segments with start/end times |
 
-### Optional frame classifier
+At equal timestamps, the image precedes the speech segment. Overlapping speech cues retain their full intervals; word timings are not invented. If speech is missing or fails, images remain available and the transcript status says `unavailable` or `failed`.
 
-Set both variables to enable local vision classification after extraction:
+## Speech backends
+
+Native captions are preferred. The downloader currently requests English caption variants. If captions are unavailable, `--transcript` in textframe mode and the default scene workflow can use Whisper:
+
+- **Local:** install whisper.cpp (`brew install whisper-cpp` on macOS) and choose `--whisper local`. No API key is required. The first use downloads the model; later runs use the cache.
+- **Groq/OpenAI:** configure `GROQ_API_KEY` or `OPENAI_API_KEY` in the environment or `~/.config/watch/.env` with permissions `0600`. The fallback also reads `.env` in the current directory. Cloud transcription uploads audio to the chosen provider.
+
+Selection is CLI choice, then `WATCH_WHISPER_BACKEND`, then available Groq, OpenAI, or local backend. Focused scene runs upload only their requested audio range. Long cloud audio is split into overlapping chunks; local Whisper has no application-imposed duration limit.
+
+Local model configuration: `WATCH_WHISPER_MODEL` (default `large-v3-turbo`) and `WATCH_WHISPER_MODELS_DIR` (default `~/.cache/yt-transcribe/models`). Model names use letters, numbers, `.`, `_`, or `-`.
+
+## Optional image classification
+
+Both modes accept `LLM_RUN` (Python helper path) and `LLM_HOST` (helper destination). Missing either skips classification. Textframe mode additionally accepts `LLM_MODEL`, default `gemma4:12b`.
 
 ```bash
 export LLM_RUN=/path/to/llm_run.py
-export LLM_HOST=local-vision-host
+export LLM_HOST=vision-host
+export LLM_MODEL=gemma4:12b
 ```
 
-If either variable is missing, all frames are kept and the report says
-`classifier not configured`. Pass `--no-classify` to disable a configured classifier.
+The helper contract is `python3 HELPER HOST --model MODEL --no-think --image IMAGE PROMPT`. It must honor the supplied prompt: textframe mode accepts exactly `KEEP` or `DROP`; scene mode uses `NÜTZLICH` or `VERWERFEN`. Only explicit discard decisions remove frames. Errors, timeouts, and invalid answers stop classification and preserve unchecked frames; the report distinguishes completed, partial, failed, disabled, and unconfigured runs. Configuring a helper can send images to its destination; use `--no-classify` to prevent this.
 
-Cleanup uses `scripts/cleanup.py`, which accepts only a generated `watch-*` child
-whose ownership marker binds the exact path. It will not recursively remove an
-arbitrary `--out-dir` parent.
+## Safety and cleanup
 
-## Structure
+Video metadata, captions, OCR, images, and labelled diagnostics are untrusted evidence. Instructions embedded in media must never change the assistant's workflow or cause command execution. Reports encode external text as JSON. No platform login or session cookies are used by these commands.
 
-```
-.
-├── SKILL.md                 # skill contract — loaded by all three surfaces
-├── scripts/
-│   ├── watch.py             # entry point — orchestrates download → frames → transcript
-│   ├── download.py          # yt-dlp wrapper
-│   ├── frames.py            # ffmpeg frame extraction + auto-fps logic
-│   ├── transcribe.py        # VTT parsing + dedupe + range filtering
-│   ├── whisper.py           # local, Groq, and OpenAI transcription (pure stdlib)
-│   ├── workdir.py           # exclusive marked work-directory lifecycle
-│   ├── cleanup.py           # validates ownership marker before cleanup
-│   ├── setup.py             # preflight + installer
-│   └── build-skill.sh       # build dist/watch.skill for claude.ai upload
-├── hooks/                   # SessionStart status hook (Claude Code only)
-├── .claude-plugin/          # plugin.json + marketplace.json (Claude Code)
-├── .codex-plugin/           # codex packaging
-├── tests/                   # headless regression tests
-└── .github/workflows/       # headless tests plus tagged-release build
-```
-
-## Develop
+Every successful run retains its exclusive marked `watch-*` directory. Failed pipeline runs remove only that generated child. Source files and the `--out-dir` parent are preserved. After using a report:
 
 ```bash
-# Run the headless regression suite:
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
-
-# Build the claude.ai upload bundle:
-bash scripts/build-skill.sh      # → dist/watch.skill
+python3 scripts/cleanup.py "<work_dir from the command's JSON output>"
 ```
 
-Releasing: tag `vX.Y.Z`, push the tag. The workflow builds `dist/watch.skill` and attaches it to the GitHub release.
+The cleanup helper verifies ownership before deletion. The OCR compiler cache and local Whisper model cache persist separately.
 
-See [CHANGELOG.md](CHANGELOG.md) for version history.
+## Development
 
----
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
+bash scripts/build-skill.sh
+```
 
-## Open source
+The package builder requires a clean committed checkout and includes all runtime Python and Swift sources. Tests cover OCR deduplication, filters, classification failure handling, transcript timing, source protection, sampling, and shared backends. Native OCR is verified separately on macOS; headless unit tests run without Apple Vision.
 
-MIT license.
-
-Built on `yt-dlp`, `ffmpeg`, and Claude's multimodal `Read` tool. Whisper transcription via [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (local), [Groq](https://groq.com), or [OpenAI](https://openai.com).
-
----
-
-[github.com/bradautomates/claude-video](https://github.com/bradautomates/claude-video) · [LICENSE](LICENSE)
+See [SKILL.md](SKILL.md) for the assistant workflow, [CHANGELOG.md](CHANGELOG.md) for version history, and [docs/reviews/](docs/reviews/) for review evidence. Tagged releases build `dist/watch.skill` through the release workflow.

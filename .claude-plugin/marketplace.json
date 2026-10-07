@@ -1,21 +1,21 @@
 {
   "name": "claude-video",
   "metadata": {
-    "description": "Give Claude a video input. /watch downloads, extracts frames, transcribes, and hands it all to Claude."
+    "description": "Inspect video scenes and speech, or capture displayed text using macOS OCR."
   },
   "owner": {
-    "name": "Bradley Bonanno"
+    "name": "DanielMuellerIR"
   },
   "plugins": [
     {
       "name": "watch",
-      "description": "Watch a video (URL or local path). Downloads with yt-dlp, extracts frames with ffmpeg, transcribes via captions or Whisper.",
+      "description": "Inspect scenes and speech from video URLs or local files; capture slides and code with macOS OCR textframes.",
       "author": {
         "name": "Bradley Bonanno"
       },
       "source": "./",
       "category": "productivity",
-      "homepage": "https://github.com/bradautomates/claude-video"
+      "homepage": "https://github.com/DanielMuellerIR/claude-video"
     }
   ]
 }

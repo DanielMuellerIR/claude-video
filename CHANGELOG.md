@@ -8,6 +8,10 @@ All notable changes to `/watch` are documented here.
 - Textframes `--transcript` reuses native captions and the shared Whisper backends, writing `transkript.md` with every text image at its sample timestamp and speech with complete cue intervals.
 - `transkript.json` preserves the speech segments. Missing narration or transcription failures retain the OCR results and report the transcript status; `--no-whisper` uses captions only.
 
+### Documentation
+- English and German README editions describe both modes, dependencies, filters, speech/classification configuration, output formats, cleanup, and limitations.
+- The skill and plugin command route displayed-text requests to the OCR workflow. Installation links and plugin metadata refer to this fork, preserving upstream attribution.
+
 ## [0.1.13] — 2026-10-07
 
 ### Added
