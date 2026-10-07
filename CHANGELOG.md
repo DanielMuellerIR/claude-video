@@ -2,6 +2,12 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.1.14] — 2026-10-07
+
+### Added
+- Textframes `--transcript` reuses native captions and the shared Whisper backends, writing `transkript.md` with every text image at its sample timestamp and speech with complete cue intervals.
+- `transkript.json` preserves the speech segments. Missing narration or transcription failures retain the OCR results and report the transcript status; `--no-whisper` uses captions only.
+
 ## [0.1.13] — 2026-10-07
 
 ### Added

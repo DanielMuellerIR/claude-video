@@ -23,6 +23,8 @@ die **Portierung** hierher, sauber entkoppelt:
 1. **OCR-Kern vorhanden:** `scripts/textframes.py` und `scripts/ocr.swift` liefern
    Textframes mit konservativer Text-Deduplizierung in einem exklusiven Ausgabeordner
    mit `frames/`, `texte.md` und `texte.json`. macOS, ffmpeg und Swift sind erforderlich.
+   `--transcript` verbindet diese Bilder mit nativen Captions oder dem vorhandenen
+   Whisper-Backend in `transkript.md`; `transkript.json` enthält die Sprachsegmente.
 2. **Filter vorhanden:** Wiederkehrende kleine Randtexte und eindeutige Abo-Aufrufe
    werden heuristisch entfernt. Die optionale Klassifikation nutzt `LLM_RUN`, `LLM_HOST`
    und `LLM_MODEL`; ohne Konfiguration und bei Fehlern bleiben ungeprüfte Textframes
